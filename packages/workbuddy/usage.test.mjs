@@ -185,3 +185,69 @@ test("each model's rate is its credits", async () => {
   expect(["x0.03", " X1.00 ", 1.5, "0"].map(creditsOf)).toEqual([0.03, 1, 1.5, 0])
   for (const c of ["", null, undefined, "free", "x-1", "Infinity"]) expect(creditsOf(c)).toBeUndefined()
 })
+
+// the detail lists as www.workbuddy.ai sent them for a Pro account on
+// 2026-10-11 (ids left out): the Bonus Pack's 232.4 credits left end on
+// 10-13, before Pro's on 10-29; the Free Plan's daily slice (CapacityType
+// 4) isn't in the summary and ends at the same midnight on every account
+const BONUS = "TCACA_code_006_DbXS0lrypC"
+const AI_SUMMARY = { IsPaidUser: true, Packages: [
+  { PackageCode: "TCACA_code_002_AkiJS3ZHF5", CycleTotalCapacity: "1000", CycleRemainCapacity: "1000", CycleUsedCapacity: "0" },
+  { PackageCode: BONUS, CycleTotalCapacity: "250", CycleRemainCapacity: "232.4", CycleUsedCapacity: "17.6" },
+  { PackageCode: "TCACA_code_037_WxOD3MpI2o", CycleTotalCapacity: "1000", CycleRemainCapacity: "1000", CycleUsedCapacity: "0" },
+] }
+const AI_PAID = { TotalCount: 1, Accounts: [
+  { PackageCode: "TCACA_code_002_AkiJS3ZHF5", PackageName: "Pro Monthly", CapacityType: 2, CycleCapacityRemainPrecise: "1000", CycleStartTime: "2026-09-29 00:40:52", CycleEndTime: "2026-10-29 00:40:52", DeductionEndTime: 1793205652000, ExpiredTime: "" },
+] }
+const AI_FREE = { TotalCount: 3, Accounts: [
+  { PackageCode: BONUS, PackageName: "Bonus Pack", CapacityType: 1, CycleCapacityRemainPrecise: "232.4", CycleStartTime: "2026-09-29 00:39:27", CycleEndTime: "2026-10-13 00:39:27", DeductionEndTime: 1791823167000, ExpiredTime: "" },
+  { PackageCode: "TCACA_code_037_WxOD3MpI2o", PackageName: "Plan Bonus", CapacityType: 2, CycleCapacityRemainPrecise: "1000", CycleStartTime: "2026-09-29 00:40:52", CycleEndTime: "2026-10-29 00:40:52", DeductionEndTime: 1793205652000, ExpiredTime: "" },
+  { PackageCode: "TCACA_code_035_ArVxJcGDsm", PackageName: "Free Plan", CapacityType: 4, CycleCapacityRemainPrecise: "100", CycleStartTime: "2026-10-01 00:00:00", CycleEndTime: "2026-10-31 23:59:59", DeductionEndTime: 2050936768000, ExpiredTime: "" },
+] }
+
+test("the credits that run out soonest, for routing to spend first (cdredfox on X)", async () => {
+  // the same lists ten years on, so the test still reads them as to come
+  const YEARS = 10, later10 = (d) => ({ ...d, Accounts: d.Accounts.map((p) => ({ ...p, DeductionEndTime: p.DeductionEndTime + Date.UTC(2036, 9, 1) - Date.UTC(2026, 9, 1),
+    CycleEndTime: String(Number(p.CycleEndTime.slice(0, 4)) + YEARS) + p.CycleEndTime.slice(4) })) })
+  const bodies = {}
+  serve({
+    "/billing/meter/get-user-resource-summary": () => ok(AI_SUMMARY),
+    "/billing/meter/get-user-resource-paid-packages": (init) => ((bodies.paid = JSON.parse(init.body)), ok(later10(AI_PAID))),
+    "/billing/meter/get-user-resource-free-packages": (init) => ((bodies.free = JSON.parse(init.body)), ok(later10(AI_FREE))),
+  })
+  const auth = { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u" }
+  const u = await usageOf(WorkBuddyAIAuthPlugin, auth)
+  const w = u.windows.find((x) => x.name === "Credits")
+  expect(w.runsOutAt).toBe("2036-10-12T16:39:27.000Z")
+  expect(w.runsOut).toBe(232.4)
+  // the lists are asked for as WorkBuddy's client asks: without the codes
+  // the API answers 10001 "PackageCodes required"
+  expect(bodies.paid).toMatchObject({ PageNumber: 1, PageSize: 200, Status: [0, 3], NeedRenewInfo: true })
+  expect(bodies.paid.PackageCodes).toContain("TCACA_code_002_AkiJS3ZHF5")
+  expect(bodies.free.PackageCodes).toContain(BONUS)
+  expect(bodies.free.SlicePeriodStartTime).toMatch(/^\d{4}-\d{2}-\d{2} 00:00:00$/)
+})
+
+test("runsOutOf: soonest end of credits left, by the summary's packages, never the daily slice", () => {
+  const now = Date.parse("2026-10-11T12:00:00Z")
+  expect(_internal.runsOutOf(AI_SUMMARY, [...AI_PAID.Accounts, ...AI_FREE.Accounts], now)).toEqual({ runsOutAt: "2026-10-12T16:39:27.000Z", runsOut: 232.4 })
+  // the Bonus Pack spent: Pro and Plan Bonus end together, both count
+  const spent = AI_FREE.Accounts.map((p) => (p.PackageCode === BONUS ? { ...p, CycleCapacityRemainPrecise: "0" } : p))
+  expect(_internal.runsOutOf(AI_SUMMARY, [...AI_PAID.Accounts, ...spent], now)).toEqual({ runsOutAt: "2026-10-28T16:40:52.000Z", runsOut: 2000 })
+  // no DeductionEndTime: the cycle's end is read as UTC+8
+  const plain = [{ ...AI_FREE.Accounts[0], DeductionEndTime: 0 }]
+  expect(_internal.runsOutOf(AI_SUMMARY, plain, now)).toEqual({ runsOutAt: "2026-10-12T16:39:27.000Z", runsOut: 232.4 })
+  // only the daily slice, or a package already over: unknown
+  expect(_internal.runsOutOf(AI_SUMMARY, [AI_FREE.Accounts[2]], now)).toBeNull()
+  expect(_internal.runsOutOf(AI_SUMMARY, AI_FREE.Accounts, Date.parse("2026-11-01T00:00:00Z"))).toBeNull()
+})
+
+test("a detail list that can't be read leaves the card as it was", async () => {
+  serve({
+    "/billing/meter/get-user-resource-summary": () => ok(AI_SUMMARY),
+    "/billing/meter/get-user-resource-paid-packages": () => new Response(JSON.stringify({ code: 10001, msg: "PackageCodes required" }), { status: 400 }),
+  })
+  const u = await usageOf(WorkBuddyAIAuthPlugin, { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u" })
+  expect(u.error).toBeUndefined()
+  expect(u.windows[0]).toEqual({ name: "Credits", used: 100 * 17.6 / 2250, display: "17.6 / 2250", amount: 17.6, limit: 2250, unit: "credits" })
+})

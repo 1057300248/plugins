@@ -119,6 +119,15 @@ is used.
 
 A model's reasoning levels are its variants (`reasoningEffort`).
 
+## Credits in magpie
+
+magpie's usage card shows the account's credits from the resource summary.
+It also says when the soonest credits left run out (`runsOutAt`, and how
+many: `runsOut`), from the paid and free package lists WorkBuddy's own
+client reads. The daily Free Plan slice isn't counted: it ends at the same
+midnight on every account. magpie's smart routing spends the account whose
+credits run out first.
+
 ## Not here
 
 magpie's built-in WorkBuddy does more than this package:

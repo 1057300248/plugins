@@ -917,13 +917,13 @@ const statusText = (n) => STATUS_TEXT[n] || `HTTP ${n}`
 
 // meter asks the billing API as magpie's built-in did, its errors said
 // the same: WorkBuddy's message, else its code, else the HTTP status.
-async function meter(site, a, path) {
+async function meter(site, a, path, body = {}) {
   const res = await fetch(site.endpoint + path, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": "WorkBuddy/" + UA_VERSION,
       Authorization: "Bearer " + a.access, "X-User-Id": a.uid ?? "", "X-Domain": domainOf(site, a), "X-Product": "SaaS",
       "X-IDE-Type": "WorkBuddy", ...enterpriseHeaders(a) },
-    body: "{}",
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(20000),
   })
   let env = {}
@@ -967,6 +967,76 @@ function usageOf(sum, plan) {
   }
   if (total > 0) out.windows.push({ name: "Credits", used: (100 * used) / total, display: `${compact(used)} / ${compact(total)}`, amount: used, limit: total, unit: "credits" })
   return out
+}
+
+// The packages' codes, as WorkBuddy's own client lists them when it asks
+// for each package's credits (its COMMODITY_CODES): the API refuses a
+// detail list without them (10001 "PackageCodes required").
+const CODE = (n, s) => `TCACA_code_${n}_${s}`
+const PAID_CODES = [CODE("002", "AkiJS3ZHF5"), CODE("005", "maRGyrHhw1"), CODE("003", "FAnt7lcmRT"), CODE("023", "4xbGhMrE6q"),
+  CODE("026", "BaESVICNoi"), CODE("027", "0FCGVA6vSa"), CODE("009", "0XmEQc2xOf"), CODE("038", "OhvqZtiPKr"), CODE("036", "lupO5WgNdG")]
+const DAILY_CODE = CODE("001", "PqouKr6QWV")
+const FREE_CODES = [DAILY_CODE, CODE("008", "cfWoLwvjU4"), CODE("035", "ArVxJcGDsm"), CODE("006", "DbXS0lrypC"), CODE("039", "KRcQj7wUat"),
+  CODE("040", "mi9rCYg46x"), CODE("007", "nzdH5h4Nl0"), CODE("028", "NtpWi0jzXs"), CODE("037", "WxOD3MpI2o"), CODE("029", "6wCGEWquYy"),
+  CODE("030", "BjSt89qTvr")]
+// a slice package (CapacityType 4) is refreshed each day: its credits are
+// lost at the same midnight on every account, so they tell none apart
+const SLICE = "4"
+
+// beijing is WorkBuddy's own time ("2026-10-13 00:39:27" is UTC+8, as its
+// DeductionEndTime for the same package says).
+const beijing = (ms) => new Date(ms + 8 * 3600_000).toISOString().slice(0, 19).replace("T", " ")
+
+// packagesOf is every package of the account with credits, paid and free,
+// as WorkBuddy's client asks for them: active and used-up (Status 0, 3),
+// up to 10 pages of 200.
+async function packagesOf(site, a, now = Date.now()) {
+  const day = beijing(now).slice(0, 10)
+  const lists = [
+    ["/billing/meter/get-user-resource-paid-packages", { PackageCodes: PAID_CODES, NeedRenewInfo: true }],
+    ["/billing/meter/get-user-resource-free-packages", { PackageCodes: FREE_CODES, SlicePeriodStartTime: day + " 00:00:00", SlicePeriodEndTime: day + " 23:59:59" }],
+  ]
+  const out = []
+  for (const [path, extra] of lists) {
+    for (let page = 1; page <= 10; page++) {
+      const d = await meter(site, a, path, { PageNumber: page, PageSize: 200, Status: [0, 3], ...extra })
+      const got = d?.Accounts ?? []
+      out.push(...got)
+      if (got.length < 200 || out.length >= (d?.TotalCount ?? 0)) break
+    }
+  }
+  return out
+}
+
+// endOf is when a package's credits are lost: its DeductionEndTime, else
+// ExpiredTime, else the cycle's end (UTC+8), as WorkBuddy's client reads it.
+function endOf(p) {
+  const ms = Number(p?.DeductionEndTime)
+  if (ms > 0) return ms
+  for (const v of [p?.ExpiredTime, p?.CycleEndTime]) {
+    if (typeof v !== "string" || !v.trim()) continue
+    const t = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(v.trim()) ? Date.parse(v.trim().replace(" ", "T") + "+08:00") : Date.parse(v)
+    if (t > 0) return t
+  }
+  return 0
+}
+
+// runsOutOf is the soonest moment credits left in one of the account's
+// packages are lost, and how many (cdredfox on X): smart routing spends
+// the account whose credits expire first. Only packages the summary
+// counts, with credits left, and not the daily slice; null when none.
+function runsOutOf(sum, packages, now = Date.now()) {
+  const counted = new Set((sum?.Packages ?? []).map((p) => p?.PackageCode))
+  let at = 0, amount = 0
+  for (const p of packages ?? []) {
+    if (!counted.has(p?.PackageCode) || p?.PackageCode === DAILY_CODE || String(p?.CapacityType) === SLICE) continue
+    const left = capacity(p?.CycleCapacityRemainPrecise ?? p?.CycleCapacityRemain)
+    const end = endOf(p)
+    if (!(left > 0) || end <= now) continue
+    if (!at || end < at) at = end, amount = left
+    else if (end === at) amount += left
+  }
+  return at ? { runsOutAt: new Date(at).toISOString(), runsOut: amount } : null
 }
 
 // ---- models -----------------------------------------------------------------
@@ -1166,7 +1236,17 @@ function makePlugin(site) {
         try {
           const a = await current(site, client, auth)
           // the meter has no /v2 prefix, on either site
-          return { ...usageOf(await meter(site, a, "/billing/meter/get-user-resource-summary"), auth.plan), signIn: "kept" }
+          const sum = await meter(site, a, "/billing/meter/get-user-resource-summary")
+          const out = usageOf(sum, auth.plan)
+          // when the credits left run out, for routing to spend them first;
+          // a list that can't be read leaves it unknown, the card stands
+          const credits = out.windows.find((w) => w.name === "Credits")
+          if (credits) {
+            try {
+              Object.assign(credits, runsOutOf(sum, await packagesOf(site, a)) ?? {})
+            } catch {}
+          }
+          return { ...out, signIn: "kept" }
         } catch (e) {
           return { error: e?.message ?? String(e), signIn: "kept" }
         }
@@ -1258,4 +1338,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
+export const _internal = { runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
