@@ -731,10 +731,37 @@ function parseArgs(s) {
   }
 }
 
+// WORK_DIR and WORK_GIT are where magpie tells a plugin's fetch the agent
+// that asked works: the folder, percent-encoded, and "yes" or "no" for a
+// git repository, each left off when magpie doesn't know it (magpie's
+// provider.WorkDirHeader and WorkGitHeader). They are for the plugin, not
+// the vendor.
+const WORK_DIR = "x-magpie-work-dir"
+const WORK_GIT = "x-magpie-work-git"
+
+// workPlace takes WORK_DIR and WORK_GIT off h: {dir?, git?}, what magpie
+// said of where the agent works.
+function workPlace(h) {
+  const place = {}
+  const dir = h.get(WORK_DIR)
+  if (dir) {
+    try {
+      place.dir = decodeURIComponent(dir)
+    } catch {}
+  }
+  const git = h.get(WORK_GIT)
+  if (place.dir && (git === "yes" || git === "no")) place.git = git
+  h.delete(WORK_DIR)
+  h.delete(WORK_GIT)
+  return place
+}
+
 // generateBody is a chat completion request as the CLI asks
-// /alpha/generate: no project behind it, the CLI's config outside a git
-// repository, in the user's home.
-function generateBody(chat) {
+// /alpha/generate, with no structure, branch or status behind it. The
+// working directory and whether it is a git repository are the agent's as
+// magpie tells them (place, yetone magpie-community/plugins#86); untold,
+// the CLI's config outside a git repository, in the user's home.
+function generateBody(chat, place = {}) {
   const system = []
   const messages = []
   const names = {} // a tool call's id → its tool
@@ -808,11 +835,11 @@ function generateBody(chat) {
   const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
   return {
     config: {
-      workingDir: homedir(),
+      workingDir: place.dir || homedir(),
       date,
       environment: process.platform,
       structure: [],
-      isGitRepo: false,
+      isGitRepo: place.git === "yes",
       currentBranch: "",
       mainBranch: "",
       gitStatus: "",
@@ -986,11 +1013,11 @@ async function* events(body) {
 }
 
 // generate answers a chat completion through /alpha/generate.
-async function generate(key, chat, signal) {
+async function generate(key, chat, signal, place) {
   const res = await fetch(API + "/alpha/generate", {
     method: "POST",
     headers: generateHeaders(key),
-    body: JSON.stringify(generateBody(chat)),
+    body: JSON.stringify(generateBody(chat, place)),
     signal,
   })
   if (!res.ok) return errorResponse(failure(res.status, (await res.text()).slice(0, 1 << 20)))
@@ -1091,6 +1118,7 @@ export async function CommandCodePlugin({ client } = {}) {
             const key = await liveKey((await getAuth()) ?? auth)
             headers.set("Authorization", `Bearer ${key}`)
             headers.set("x-api-key", key)
+            const place = workPlace(headers)
             const chatting = /\/chat\/completions$/.test(new URL(url).pathname)
             let chat
             if (chatting) {
@@ -1100,7 +1128,7 @@ export async function CommandCodePlugin({ client } = {}) {
               } catch {
                 return errorResponse({ status: 400, message: "a request that isn't JSON" })
               }
-              if ((await planNow(key, saved)) === "Go") return kept(await generate(key, chat, init.signal))
+              if ((await planNow(key, saved)) === "Go") return kept(await generate(key, chat, init.signal, place))
             }
             // the Provider API's answer goes on as it came, the account
             // kept: the built-in neither marked one lapsed nor cleared it
@@ -1113,7 +1141,7 @@ export async function CommandCodePlugin({ client } = {}) {
             const text = await res.text()
             if (GO_NO_API.test(text)) {
               await isGo(key, (await getAuth()) ?? auth)
-              if (chatting) return kept(await generate(key, chat, init.signal))
+              if (chatting) return kept(await generate(key, chat, init.signal, place))
             }
             return kept(new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers }))
           },
