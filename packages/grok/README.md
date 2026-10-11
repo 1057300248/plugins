@@ -55,7 +55,11 @@ API (`@ai-sdk/openai`), signed as the CLI signs them:
 - `x-grok-client-mode: headless`
 - `x-grok-client-version` and `User-Agent: grok-shell/<version> (<os>; <arch>)`.
   The version is 1.0.41, or the installed CLI's if it is newer.
-- `x-grok-model-override`: the request's model.
+- `x-grok-model-override`: the request's model. A window suffix
+  (`grok-4.7@500k`) is the plain model (`grok-4.7`) here and in the body.
+- `x-grok-context-window`: the token count a suffixed model names
+  (`500000` for `@500k`). The plain id sends no such header and stays on
+  the default window.
 - `x-grok-conv-id`: the request's `prompt_cache_key`.
 
 The backend turns away some of what a request may carry, so the plugin
@@ -73,8 +77,17 @@ unrecognized content stays unchanged; the plugin does not decrypt tasks.
 ## Models
 
 Grok 4.7 until signed in. Signed in, the models are the ones the account
-lists at `/v1/models` (Responses models only), each with its context
-window and its reasoning efforts as variants.
+lists at `/v1/models` (Responses models only), each with its reasoning
+efforts as variants.
+
+`context_window` is the default window and keeps the plain id, so a saved
+`grok-4.7` stays a 256k model. Each other size in `context_windows` is
+offered beside it, named `Grok 4.7 @ 500k` with id `grok-4.7@500k` and
+that many tokens as its window. A request for it sends
+`x-grok-context-window: 500000`. The proxy serves up to its largest
+window either way and refuses past it; the header names the window the
+caller asked to compact against. Pick `grok-4.7@500k` where a client
+compacts at the advertised window, such as Claude Code.
 
 ## Usage
 

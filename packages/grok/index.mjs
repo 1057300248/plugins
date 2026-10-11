@@ -384,10 +384,46 @@ async function listModels(key) {
   for (const d of JSON.parse(text)?.data ?? []) {
     if (!d?.id || (d.api_backend && d.api_backend !== "responses")) continue
     const efforts = (d.reasoning_efforts ?? []).map((e) => e?.value).filter(Boolean).reverse()
-    out.push({ id: d.id, name: d.name || d.id, context: d.context_window ?? 0, efforts })
+    out.push(...windowsOf(d, efforts))
   }
   if (!out.length) throw new Error("Grok listed no models")
   return out
+}
+
+// labelOf is a window as the picker shows it: 500000 is "500k".
+const labelOf = (n) => (n % 1000 === 0 ? `${n / 1000}k` : String(n))
+
+// windowsOf is one model for each context window Grok lists. context_window
+// is the default and keeps the plain id (grok-4.7), so a saved agent stays
+// where it was. Each other size in context_windows is offered beside it
+// (grok-4.7@500k), the way the CLI's /context-window offers it. A list with
+// one size, or none, stays one model.
+function windowsOf(d, efforts) {
+  const name = d.name || d.id
+  const fallback = Number(d.context_window) || 0
+  const listed = (Array.isArray(d.context_windows) ? d.context_windows : [])
+    .map(Number)
+    .filter((n) => Number.isInteger(n) && n > 0)
+  const windows = [...new Set(listed.length ? listed : [fallback].filter(Boolean))]
+  const base = windows.includes(fallback) ? fallback : windows[0] ?? 0
+  const out = [{ id: d.id, apiId: d.id, name, context: base || fallback, window: base, efforts }]
+  for (const w of windows) {
+    if (w === base) continue
+    out.push({ id: `${d.id}@${labelOf(w)}`, apiId: d.id, name: `${name} @ ${labelOf(w)}`, context: w, window: w, efforts })
+  }
+  return out
+}
+
+// modelOf splits a requested id into the model Grok lists and the window
+// the id names. grok-4.7 is grok-4.7 at its default window (no header);
+// grok-4.7@500k is grok-4.7 at 500000 tokens. The header is what the CLI
+// sends as x-grok-context-window. The proxy serves up to its largest
+// window either way and refuses past it; the header names the window the
+// caller asked to compact against.
+function modelOf(id) {
+  const at = typeof id === "string" ? id.match(/^(.*)@(\d+)k$/) : null
+  if (!at) return { model: id, window: 0 }
+  return { model: at[1], window: Number(at[2]) * 1000 }
 }
 
 // ---- sign-in ------------------------------------------------------------------
@@ -692,7 +728,7 @@ export const GrokAuthPlugin = async ({ client }) => {
             const home = auth?.refresh
             if (!home) throw new Error("Grok is not signed in; run `grok login`")
             const req = new Request(input, init)
-            const body = rewrite(bodyText(init?.body))
+            let body = rewrite(bodyText(init?.body))
             let parsed = {}
             if (typeof body === "string") {
               try {
@@ -703,7 +739,15 @@ export const GrokAuthPlugin = async ({ client }) => {
             await remember(auth, c)
             const headers = new Headers(req.headers)
             await sign(headers, c.key)
-            if (typeof parsed.model === "string" && parsed.model) headers.set("x-grok-model-override", parsed.model)
+            const asked = modelOf(parsed.model)
+            if (asked.model) {
+              headers.set("x-grok-model-override", asked.model)
+              if (asked.window && typeof body === "string") {
+                parsed.model = asked.model
+                body = JSON.stringify(parsed)
+              }
+            }
+            if (asked.window) headers.set("x-grok-context-window", String(asked.window))
             if (typeof parsed.prompt_cache_key === "string" && parsed.prompt_cache_key) headers.set("x-grok-conv-id", parsed.prompt_cache_key)
             headers.delete("content-length")
             // sent once, as the built-in sent it: Grok's answer goes on as
@@ -757,12 +801,15 @@ export const GrokAuthPlugin = async ({ client }) => {
         const base = have["grok-4.7"] ?? Object.values(have)[0] ?? {}
         const out = {}
         for (const m of list) {
-          const was = have[m.id] ?? base
+          const was = have[m.id] ?? have[m.apiId] ?? base
           out[m.id] = {
             ...was,
             id: m.id,
             providerID: provider.id,
             name: m.name,
+            // the id as offered, window and all: magpie and the AI SDK send
+            // api.id as the body's model, and fetch reads the window from it
+            // (modelOf) before Grok sees the plain model
             api: { ...(was.api ?? {}), id: m.id, url: BASE, npm: "@ai-sdk/openai" },
             limit: { ...(was.limit ?? {}), context: m.context || was.limit?.context || 0, output: was.limit?.output ?? 0 },
             capabilities: {
@@ -782,4 +829,4 @@ export const GrokAuthPlugin = async ({ client }) => {
 }
 
 // for tests
-export const _internal = { rewrite, objectRoot, bodyText, limited, HOLD_MS }
+export const _internal = { rewrite, objectRoot, bodyText, limited, HOLD_MS, windowsOf, modelOf }
