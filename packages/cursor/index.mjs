@@ -723,17 +723,20 @@ function pick(entry, effort, fast, seed) {
 // without thinking stops at high), the variant with those parameters at the
 // nearest effort it has, not the default's id with parameters that
 // contradict it (claude-opus-5-thinking-high with thinking=false). Where
-// the default differs from what is asked in the effort alone, the effort
-// goes as asked, as for a listed model.
+// the default differs from what is asked in the effort alone, and no
+// variant at all is named for that effort, the effort goes as asked, as for
+// a listed model (claude-opus-5-5-xhigh). When another branch has it, the
+// default's own branch stops short there, and its nearest goes (#55).
 function branch(entry, want) {
   if (!entry.pid || entry.pid === "thinking") return undefined
+  const level = (x) => (x === "extra-high" ? "xhigh" : x)
   const def = valuesOf(entry.def)
-  if (Object.keys(want).every((k) => k === entry.pid || k === "context" || def[k] === undefined || def[k] === want[k])) return undefined
+  const named = entry.variants.some((v) => level(valuesOf(v)[entry.pid]) === level(want[entry.pid]))
+  if (!named && Object.keys(want).every((k) => k === entry.pid || k === "context" || def[k] === undefined || def[k] === want[k])) return undefined
   const vs = entry.variants.filter((v) => {
     const have = valuesOf(v)
     return entry.pid in have && Object.keys(want).every((k) => k === entry.pid || have[k] === undefined || have[k] === want[k])
   })
-  const level = (x) => (x === "extra-high" ? "xhigh" : x)
   const at = fitEffort(level(want[entry.pid]), vs.map((v) => level(valuesOf(v)[entry.pid])))
   return at ? vs.find((v) => level(valuesOf(v)[entry.pid]) === at) : undefined
 }
