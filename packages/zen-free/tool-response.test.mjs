@@ -1397,3 +1397,19 @@ test("anthropic and responses: a stream cut short still fails, naming the reply 
     assert.match(message, protocol === "anthropic" ? /reply msg_1/ : /reply resp_1/);
   }
 });
+
+test("a declared name of separators only is never handed another call (#76 follow-up)", async () => {
+  const rules = { declared: new Set(["todo_write", "_"]) };
+  for (const name of ["--", "-", "__"]) {
+    const result = await guardToolResponse(
+      Response.json(snapshot("chat", [name])),
+      "chat",
+      rules,
+    );
+    const data = await result.json();
+    assert.deepEqual(callsIn("chat", [data]), []);
+    assert.match(textIn("chat", [data]), /a tool this agent doesn't have/);
+  }
+  const exact = await guardToolResponse(Response.json(snapshot("chat", ["_"])), "chat", rules);
+  assert.deepEqual(callsIn("chat", [await exact.json()]), ["_"]);
+});

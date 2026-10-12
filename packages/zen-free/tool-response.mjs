@@ -40,6 +40,9 @@ function foldsTo(declared, key) {
   const folded = new Map();
   for (const name of declared) {
     const k = key(name);
+    // A name of separators only folds to nothing, and would be handed any
+    // other such call ("_" for "--"): it matches only itself.
+    if (!k) continue;
     folded.set(k, folded.has(k) ? null : name);
   }
   return folded;

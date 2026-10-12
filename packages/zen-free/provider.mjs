@@ -67,10 +67,8 @@ function normalizeTools(body, protocol) {
   if (protocol === "chat" && Array.isArray(body.functions)) {
     for (const tool of body.functions) if (typeof tool?.name === "string") declared.add(tool.name);
   }
-  const injected = new Set();
   for (const name of CORE_TOOLS) {
     if (present.has(name)) continue;
-    injected.add(name);
     const parameters = { type: "object", properties: {}, additionalProperties: false };
     const definition = { name, description: "Not available. Never call this tool." };
     body.tools.push(
@@ -81,7 +79,7 @@ function normalizeTools(body, protocol) {
           : { type: "function", ...definition, parameters },
     );
   }
-  return { declared, injected };
+  return { declared };
 }
 
 function sessionID(headers, body) {
