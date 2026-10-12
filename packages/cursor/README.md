@@ -140,7 +140,10 @@ team or personal spend limit, as `cursor-agent`'s usage view shows it) also
 shows On-demand: its spend, and its limit when it has one. Cursor keeps
 serving such an account past the included usage, so magpie doesn't count
 it used up when Cursor Models or Other Models reach 100%; it does when the
-on-demand spend reaches its limit.
+on-demand spend reaches its limit. A team member with no limit of their
+own spends the team's pool: On-demand shows the pool's spend and limit,
+with the member's own spend beside it, and the account is used up when
+the pool is.
 
 Sign in to the Cursor account linked in Grok Bot. A linked SuperGrok
 subscription grants Bot access without a paid Cursor plan; see

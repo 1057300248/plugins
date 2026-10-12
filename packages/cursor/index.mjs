@@ -385,7 +385,10 @@ function firstParty(model) {
 // period's spendLimitUsage (cents) and, where that sets no limit of the
 // user's, GetHardLimit's reply (dollars; undefined when it couldn't be
 // read). kind is "fixed" (up to limitDollars), "unlimited", "disabled" or
-// "unavailable" (not known).
+// "unavailable" (not known). A team member with no limit of their own
+// spends the team's pool, which cursor-agent's view calls unlimited but
+// which runs out at pooledLimit for the whole team (magpie #1868): that is
+// a fixed limit on the pool's spend, with the member's own in mineDollars.
 function onDemandOf(data, hard) {
   const s = data?.spendLimitUsage
   const usedDollars = Number(s?.individualUsed ?? 0) / 100
@@ -397,8 +400,11 @@ function onDemandOf(data, hard) {
         : { kind: "disabled", usedDollars }
   if (s?.limitType === "team") {
     if (own) return own
-    if (hard) return hard.noUsageBasedAllowed || !(Number(hard.hardLimit) > 0) ? { kind: "disabled", usedDollars } : { kind: "unlimited", usedDollars }
-    return Number(s.pooledLimit ?? 0) > 0 ? { kind: "unlimited", usedDollars } : { kind: "unavailable", usedDollars }
+    if (hard && (hard.noUsageBasedAllowed || !(Number(hard.hardLimit) > 0))) return { kind: "disabled", usedDollars }
+    // pooledLimit and pooledRemaining come as int64 strings, pooledUsed as a number
+    const pool = Number(s.pooledLimit ?? 0)
+    if (pool > 0) return { kind: "fixed", usedDollars: Number(s.pooledUsed ?? 0) / 100, limitDollars: pool / 100, mineDollars: usedDollars }
+    return hard ? { kind: "unlimited", usedDollars } : { kind: "unavailable", usedDollars }
   }
   if (!hard) return own ?? { kind: "unavailable", usedDollars }
   if (hard.noUsageBasedAllowed) return { kind: "disabled", usedDollars }
@@ -422,7 +428,8 @@ async function hardLimit(tok) {
   }
 }
 
-const dollars = (n) => "$" + n.toFixed(2)
+// dollars, thousands grouped: a team's pool runs to six figures ($451,200.00)
+const dollars = (n) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 // usage is the account's windows this billing period; an enterprise plan
 // reports spend instead, and gets none. ids are the models it can be
@@ -430,7 +437,8 @@ const dollars = (n) => "$" + n.toFixed(2)
 // may spend on-demand once its included usage is gone (fottencity on
 // Discord: a team that pays for more) is still served when the pools are
 // spent, so they are shown aside, and its On-demand spend is what can run
-// out: at its limit, or never when it has none.
+// out: at its limit (a team member with none of their own: the team's
+// pool), or never when it has none.
 async function usage(tok, ids) {
   const [res, hard] = await Promise.all([
     fetch(API + "/aiserver.v1.DashboardService/GetCurrentPeriodUsage", {
@@ -467,7 +475,7 @@ async function usage(tok, ids) {
   const pooled = od.kind === "fixed" || od.kind === "unlimited" ? { aside: true } : {}
   const onDemand =
     od.kind === "fixed"
-      ? [{ name: "On-demand", used: Math.max(0, Math.min(100, (100 * od.usedDollars) / od.limitDollars)), display: `${dollars(od.usedDollars)} / ${dollars(od.limitDollars)}`, ...resets }]
+      ? [{ name: "On-demand", used: Math.max(0, Math.min(100, (100 * od.usedDollars) / od.limitDollars)), display: `${dollars(od.usedDollars)} / ${dollars(od.limitDollars)}` + (od.mineDollars === undefined ? "" : ` (you: ${dollars(od.mineDollars)})`), ...resets }]
       : od.kind === "unlimited"
         ? [{ name: "On-demand", used: 0, display: dollars(od.usedDollars), ...resets, aside: true }]
         : []
