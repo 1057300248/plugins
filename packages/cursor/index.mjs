@@ -1896,6 +1896,12 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
   let said = 0
   // wrote: the reply's text alone; a turn of thinking only says nothing
   let wrote = 0
+  // what the Run sent, for an empty reply to name (#60): the thinking's
+  // length, Cursor's own tools it asked for and was refused, and updates
+  // and messages this doesn't read
+  const seen = { thinking: 0, refused: new Map(), updates: new Map(), messages: new Map() }
+  const count = (m, k) => m.set(k, (m.get(k) ?? 0) + 1)
+  const empty = (how) => ({ error: { status: 502, message: "an empty reply" + emptyWhy(how, seen, ended ? usage : null) } })
   let usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 }
   // counted: the step's usage is the dashboard's events, its own counted
   // with it or by a later step (ledger), never guessed
@@ -1941,7 +1947,7 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
       if (f.end) {
         const e = failure(200, f.data)
         if (e.status < 200 || e.status > 299) yield { error: e }
-        else if (wrote === 0 && calls === 0) yield { error: { status: 502, message: "an empty reply" } }
+        else if (wrote === 0 && calls === 0) yield empty(endFrame(f.data))
         else yield await settled()
         return
       }
@@ -1966,6 +1972,7 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
                   const t = pbStr(uf, 1)
                   if (t) {
                     said += t.length
+                    seen.thinking += t.length
                     yield { reasoning: t }
                   }
                   break
@@ -1976,7 +1983,7 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
                   if (calls === 0) {
                     // nothing written and nothing called: an empty reply,
                     // which the client asks again, not a finished turn
-                    yield wrote === 0 ? { error: { status: 502, message: "an empty reply" } } : await settled()
+                    yield wrote === 0 ? empty("Cursor ended the turn") : await settled()
                     return
                   }
                   break
@@ -1987,12 +1994,14 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
                     return
                   }
                   break
+                default:
+                  count(seen.updates, u.num)
               }
             }
             break
           case 2: {
             // exec_server_message: the server asks the client to run something
-            const call = exec(m.data, tools, send, closeExec)
+            const call = exec(m.data, tools, send, closeExec, seen.refused)
             if (call) {
               said += call.args.length
               yield { tool: { index: calls++, ...call } }
@@ -2021,6 +2030,8 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
             }
             break
           }
+          default:
+            count(seen.messages, m.num)
         }
       }
     }
@@ -2038,10 +2049,33 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
   }
 }
 
+// endFrame is how a Run's Connect end frame that said no error reads in
+// an empty reply's words: its JSON, cut short, or that it was empty.
+function endFrame(data) {
+  const t = Buffer.from(data ?? []).toString("utf8").trim()
+  if (!t || t === "{}") return "the Run's stream ended (an empty end frame)"
+  return `the Run's stream ended (end frame: ${t.length > 300 ? t.slice(0, 300) + "…" : t})`
+}
+
+// emptyWhy is what an empty reply says of what came before it (#60): how
+// it ended, the thinking, the turn's own count of output, Cursor's own
+// tools refused, and what Cursor sent that isn't read. Field numbers are
+// agent.v1's, so a report names the message that wasn't understood.
+function emptyWhy(how, seen, usage) {
+  const list = (m) => [...m].map(([k, n]) => (n > 1 ? `#${k} ×${n}` : `#${k}`)).join(", ")
+  const parts = [how]
+  parts.push(seen.thinking ? `after ${seen.thinking} chars of thinking, no text and no tool call` : "with no thinking, no text and no tool call")
+  if (usage) parts.push(`Cursor counted ${usage.output} output tokens`)
+  if (seen.refused.size) parts.push(`Cursor's own tools asked for and refused: ${list(seen.refused)}`)
+  if (seen.updates.size) parts.push(`updates not read: ${list(seen.updates)}`)
+  if (seen.messages.size) parts.push(`messages not read: ${list(seen.messages)}`)
+  return ` (${parts.join("; ")}; try again)`
+}
+
 // exec answers what the server asks the client to run: a call of the
 // caller's tools is returned, the list of them is given, and anything else
 // is refused.
-function exec(msg, tools, send, closeExec) {
+function exec(msg, tools, send, closeExec, refused) {
   const es = fields(msg)
   const id = pbNum(es, 1)
   const execID = pbStr(es, 15)
@@ -2080,6 +2114,8 @@ function exec(msg, tools, send, closeExec) {
     }
   }
   // a shell, a file read or an edit of Cursor's own: never run
+  const kind = es.find((e) => e.num !== 1 && e.num !== 15)?.num ?? 0
+  refused?.set(kind, (refused.get(kind) ?? 0) + 1)
   send(pb().bytes(5, pb().bytes(2, pb().varint(1, id).str(2, "not available"))).done())
   closeExec(id)
   return null
