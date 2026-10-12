@@ -83,8 +83,10 @@ itself.
 
 | What Qoder says | What the request returns |
 |---|---|
-| A refused sign-in | 401 |
-| A quota | 429 |
+| A refused sign-in (no code, or code 105) | 401 |
+| A quota (codes 110, 112–119, 122) | 429 |
+| Busy or queued for the model (code 10605) | 503, with `Retry-After` from Qoder's `retryAfterSeconds` (30s when it gives none); the sign-in is untouched |
+| A refusal of the request itself (codes 406, 416, 430, 80411, 80412, 100400–100403) | 400, with Qoder's words |
 | A failure before the answer starts | Qoder's status |
 | A failure after the answer has started | The stream ends with an error |
 
