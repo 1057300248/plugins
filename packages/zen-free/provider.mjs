@@ -286,7 +286,9 @@ async function server(_input, options = {}) {
               signal: request.signal,
               redirect: "error",
             });
-            const guarded = await guardToolResponse(response, protocol, toolPolicy);
+            const guarded = await guardToolResponse(response, protocol, toolPolicy, {
+              endCutShort: streaming,
+            });
             return streaming ? guarded : collapseResponse(guarded, protocol);
           },
         };

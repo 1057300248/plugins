@@ -441,3 +441,28 @@ test("a model made free since the list was read is served after the list is aske
   assert.equal(response.status, 200);
   assert.equal(state.calls.at(-1).body.model, "late-free");
 });
+
+test("a Chat stream Zen closes before its [DONE] ends cut short for a streaming client and fails for one that doesn't (#91)", async (t) => {
+  const { plugin, state, origin } = await fixture(t);
+  await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  const loader = await plugin.auth.loader(publicAuth);
+  state.reply =
+    'data: {"id":"x2","object":"chat.completion.chunk","created":1,"model":"chat-free","choices":[{"index":0,"delta":{"role":"assistant"}}],"usage":null}\n\n' +
+    'data: {"id":"x2","object":"chat.completion.chunk","created":1,"model":"chat-free","choices":[{"index":0,"delta":{"content":"Installed successfully and all"}}],"usage":null}\n\n' +
+    'data: {"id":"x2","object":"chat.completion.chunk","created":1,"model":"chat-free","choices":[{"index":0,"delta":{"content":" other plugins are intact."}}],"usage":null}\n\n';
+  const send = (stream) =>
+    loader.fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: "chat-free", stream, messages: [{ role: "user", content: "hi" }] }),
+    });
+  const streamed = await send(true);
+  assert.equal(streamed.status, 200);
+  const text = await streamed.text();
+  assert.match(text, /other plugins are intact\./);
+  assert.match(text, /The reply was cut short.*"finish_reason":"stop"/);
+  assert.match(text, /data: \[DONE\]\n\n$/);
+  assert.doesNotMatch(text, /"error"/);
+  const whole = await send(false);
+  assert.notEqual(whole.status, 200);
+  assert.match(await whole.text(), /without a completion marker \(reply x2, 3 events/);
+});

@@ -44,3 +44,18 @@ to `todo_write`, `webfetch` to `web_fetch`), when exactly one does. A
 call with no such tool (or with no name) is left out of the reply, and
 the reply's text says which name was left out; a turn whose every call
 was left out ends as an ordinary answer. Tools run in the agent.
+
+Zen's free tier only answers a request that carries tools, so a request
+is sent with the five core OpenCode tools the agent doesn't declare
+itself (`bash`, `edit`, `glob`, `grep`, `read`), described as not
+available. A call of one of them the agent doesn't have is left out like
+any other.
+
+Now and then Zen closes a streamed Chat Completions reply before its
+`[DONE]`. When the reply has said something and no tool call of it is
+unfinished, it ends there as an ordinary answer, and its text says it was
+cut short; asking again goes on. A reply cut short with a tool call
+unfinished, with nothing said, or collapsed for a client that doesn't
+stream fails with an error naming the reply's id and how much of it came.
+An Anthropic Messages or Responses reply cut short fails too: magpie
+tells it from a whole one and, where the model can, goes on with it.
