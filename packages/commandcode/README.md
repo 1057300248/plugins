@@ -37,6 +37,9 @@ Keys don't expire, so there is nothing to refresh.
     or not.
   - Failures keep their statuses: a model the plan lacks is a 403, running
     out of credits is a 402, and a usage-window limit is a 429.
+  - A reply that stops before its finish line is a 502, unless it was
+    streamed and had already said something. Then it ends cut short, with
+    a note saying so, and `[DONE]` (#91).
 
 The plan is read from `/alpha/billing/subscriptions`. It is cached for 10
 minutes; after a failed read, the plugin tries again after 1 minute.

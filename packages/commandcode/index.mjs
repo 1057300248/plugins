@@ -953,12 +953,21 @@ async function* lines(body) {
 
 const FINISH = { "tool-calls": "tool_calls", length: "length", "content-filter": "content_filter" }
 
+// CUT_SHORT_NOTE ends a streamed reply Command Code stopped sending
+// before its finish line (as zen-free does, #91): magpie's gateway can't go
+// on with a Chat Completions reply, and failing it would throw away what
+// the client was already shown.
+const CUT_SHORT_NOTE = "(The reply was cut short: Command Code closed the stream before it finished. Ask again to go on.)"
+
 // events turns the reply's lines into chat completion pieces: text,
 // reasoning, whole tool calls, then the finish with the usage. A reply
-// with no finish line was cut short: an error, not a shorter answer.
+// with no finish line was cut short: { cut } when it said something
+// (its tool calls come whole, never half written), else an error.
 async function* events(body) {
   let tools = 0
   let cacheWrite = 0
+  let said = false
+  let wrote = false
   for await (const s of lines(body)) {
     let l
     try {
@@ -968,15 +977,22 @@ async function* events(body) {
     }
     switch (l.type) {
       case "text-delta":
-        if (l.text) yield { text: l.text }
+        if (l.text) {
+          said = wrote = true
+          yield { text: l.text }
+        }
         break
       case "reasoning-delta":
-        if (l.text) yield { reasoning: l.text }
+        if (l.text) {
+          said = true
+          yield { reasoning: l.text }
+        }
         break
       case "tool-call": {
         if (l.providerExecuted) break // run by the server, its result beside it
         let input = l.input ?? l.args
         input = typeof input === "string" ? parseArgs(input) : input ?? {}
+        said = true
         yield { tool: { index: tools++, id: l.toolCallId || "call_" + randomBytes(12).toString("hex"), name: l.toolName, args: JSON.stringify(input) } }
         break
       }
@@ -1009,7 +1025,8 @@ async function* events(body) {
         return
     }
   }
-  yield { error: { status: 502, message: "the reply ended before it was complete" } }
+  const error = { status: 502, message: "the reply ended before it was complete" }
+  yield said ? { cut: tools > 0 ? "tool_calls" : "stop", wrote, error } : { error }
 }
 
 // generate answers a chat completion through /alpha/generate.
@@ -1070,7 +1087,13 @@ async function generate(key, chat, signal, place) {
       else if (e.reasoning) ctl.enqueue(chunk({ reasoning_content: e.reasoning }))
       else if (e.tool) ctl.enqueue(chunk({ tool_calls: [{ index: e.tool.index, id: e.tool.id, type: "function", function: { name: e.tool.name, arguments: e.tool.args } }] }))
       else if (e.stop) ctl.enqueue(chunk({}, e.stop, e.usage ? { usage: e.usage } : {}))
-      else if (e.error) {
+      else if (e.cut) {
+        // the client has its start: a shorter turn that says so, not a lost one
+        ctl.enqueue(chunk({ content: (e.wrote ? "\n\n" : "") + CUT_SHORT_NOTE }))
+        ctl.enqueue(chunk({}, e.cut))
+        ctl.enqueue(enc.encode("data: [DONE]\n\n"))
+        ctl.close()
+      } else if (e.error) {
         ctl.enqueue(enc.encode(`data: ${JSON.stringify({ error: { message: e.error.message, code: e.error.status } })}\n\n`))
         ctl.close()
       }
