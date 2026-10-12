@@ -186,6 +186,41 @@ test("each model's rate is its credits", async () => {
   for (const c of ["", null, undefined, "free", "x-1", "Infinity"]) expect(creditsOf(c)).toBeUndefined()
 })
 
+// WorkBuddy AI's GLM models take no images, though its config says every
+// model does: on 2026-10-13 a real account's image sent to glm-5.3-flash,
+// glm-5.3 and glm-5.2 came back as "[System reminder: the current model
+// does not support images. Content filtered. ...]" (Yirasumi on Discord).
+// Its other models read them, and WorkBuddy (China)'s GLM does too, so
+// only WorkBuddy AI's GLM models lose images.
+test("WorkBuddy AI's GLM models are text-only, its others and China's GLM keep images (Yirasumi on Discord)", async () => {
+  const ids = ["glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-6", "deepseek-v4.1-flash", "kimi-k3", "gemini-3.5-flash", "gpt-5.5", "hy3"]
+  const cfg = () => ok({
+    agents: [{ name: "cli", models: [...ids, "said-nothing"] }],
+    models: [...ids.map((id) => ({ id, name: id, supportsImages: id !== "hy3" })), { id: "said-nothing" }],
+  })
+  const auth = { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u", domain: "" }
+  const images = async (plugin) => {
+    serve({ "/v3/config": cfg })
+    const hooks = await plugin({ client: {} })
+    const ms = await hooks.provider.models({ id: hooks.auth.provider, models: {} }, { auth })
+    return Object.fromEntries(Object.entries(ms).map(([k, m]) => [k, [m.capabilities.input.image, m.capabilities.attachment]]))
+  }
+  expect(await images(WorkBuddyAIAuthPlugin)).toEqual({
+    "glm-5.3-flash": [false, false], "glm-5.3": [false, false], "glm-5.2": [false, false], "glm-6": [false, false],
+    "deepseek-v4.1-flash": [true, true], "kimi-k3": [true, true], "gemini-3.5-flash": [true, true], "gpt-5.5": [true, true],
+    hy3: [false, false], "said-nothing": [false, false],
+  })
+  expect(await images(WorkBuddyAuthPlugin)).toEqual({
+    "glm-5.3-flash": [true, true], "glm-5.3": [true, true], "glm-5.2": [true, true], "glm-6": [true, true],
+    "deepseek-v4.1-flash": [true, true], "kimi-k3": [true, true], "gemini-3.5-flash": [true, true], "gpt-5.5": [true, true],
+    hy3: [false, false], "said-nothing": [false, false],
+  })
+  const { textOnly, SITES } = _internal
+  // the family, by its id's start: not a model whose id only has glm in it
+  expect(textOnly(SITES["workbuddy-ai"], "my-glm-5")).toBe(false)
+  expect(textOnly(SITES.workbuddy, "glm-5.3-flash")).toBe(false)
+})
+
 // the detail lists as www.workbuddy.ai sent them for a Pro account on
 // 2026-10-11 (ids left out): the Bonus Pack's 232.4 credits left end on
 // 10-13, before Pro's on 10-29; the Free Plan's daily slice (CapacityType

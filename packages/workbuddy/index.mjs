@@ -77,7 +77,25 @@ const SITES = {
     platform: "workbuddy-ai",
     ai: true,
     models: AI_MODELS,
+    // models whose images WorkBuddy AI drops though its config says they
+    // take them (see textOnly)
+    noImages: /^glm-/,
   },
+}
+
+// textOnly says whether site drops the images sent to model, whatever its
+// config says. On 2026-10-13, with a real WorkBuddy AI account (Yirasumi on
+// Discord), www.workbuddy.ai's /v3/config marked every model
+// supportsImages: true, but a chat to glm-5.3-flash, glm-5.3 or glm-5.2
+// came back saying "[System reminder: the current model does not support
+// images. Content filtered. ...]": the server had taken the image out.
+// Its other models (deepseek-v4.1-flash, kimi, gemini, grok, gpt) read
+// them, and WorkBuddy (China)'s glm-5.3-flash does too, so this is WorkBuddy
+// AI's GLM models alone. Said text-only, magpie's image-describing model
+// reads the image for them; a user who said the model takes images keeps
+// their own answer (magpie's settings, over what this list says).
+function textOnly(site, model) {
+  return !!site.noImages?.test(model)
 }
 
 const NPM = "@ai-sdk/openai-compatible"
@@ -1180,7 +1198,7 @@ async function liveModels(site, a) {
       if (d) {
         m.context = d.maxInputTokens
         m.output = d.maxOutputTokens
-        m.images = d.supportsImages === true
+        m.images = d.supportsImages === true && !textOnly(site, id)
         const r = creditsOf(d.credits)
         if (r !== undefined) {
           m.free = r === 0
@@ -1394,4 +1412,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
+export const _internal = { textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
