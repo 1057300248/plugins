@@ -340,9 +340,11 @@ async function refreshJob(site, refresh, user) {
 const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max"]
 const EFF5 = ["low", "medium", "high", "xhigh", "max"]
 
-// Qoder's list when the account's can't be asked (as it was on 2026-09-30).
+// Qoder's list when the account's can't be asked (as it was on 2026-09-30,
+// with the app's Fast from 2026-10-12).
 const MODELS = [
   { id: "ultimate", name: "Ultimate", context: 1_000_000, efforts: EFF5 },
+  { id: "fast", name: "Fast", context: 1_000_000 },
   { id: "performance", name: "Performance", context: 1_000_000, efforts: EFF5 },
   { id: "efficient", name: "Efficient", context: 200_000 },
   { id: "smodel", name: "Sonus", context: 180_000, efforts: EFF5 },
@@ -485,10 +487,34 @@ function modelInfo(raw) {
   return m
 }
 
-// modelInfos is the listing's enabled chat models an agent can pick: "auto"
+// sceneModels is the models an agent can pick from the listing: the "app"
+// scene's, which is what Qoder's app shows and what a request names
+// (qoderBody's product and session_type "app"), in its order, then any
+// "chat" model the app no longer lists, after the model it followed there,
+// so a pick made before stays served. On 2026-10-12 the app listed Fast
+// (fast, 0.8×) where Performance (1.1×) had been, and chat still listed
+// Performance (magpie-community/plugins#97). A listing with only one scene
+// gives that one. Each key once: the app's entry wins.
+function sceneModels(listing) {
+  const app = Array.isArray(listing?.app) ? listing.app : []
+  const chat = Array.isArray(listing?.chat) ? listing.chat : []
+  const out = [...app]
+  let after = -1
+  for (const m of chat) {
+    const i = out.findIndex((x) => x?.key === m?.key)
+    if (i >= 0) {
+      after = i
+      continue
+    }
+    out.splice(++after, 0, m)
+  }
+  return out
+}
+
+// modelInfos is the listing's enabled models an agent can pick: "auto"
 // and "default" route inside Qoder and aren't one model.
 function modelInfos(listing) {
-  return (listing?.chat ?? [])
+  return sceneModels(listing)
     .filter((m) => m?.enable && !["", "auto", "default"].includes(String(m.key ?? "").trim()))
     .map(modelInfo)
 }
