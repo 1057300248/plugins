@@ -614,6 +614,12 @@ function imageFormat(mediaType) {
   return f
 }
 
+// addImage puts an Anthropic image block in images as Kiro takes it: the
+// bytes inline. One named only by a URL has no bytes to send and is left out.
+function addImage(images, p) {
+  if (p.source?.type === "base64" && p.source.data) images.push({ format: imageFormat(p.source.media_type), source: { bytes: p.source.data } })
+}
+
 const textOf = (c) =>
   typeof c === "string" ? c : Array.isArray(c) ? c.filter((p) => p?.type === "text").map((p) => p.text ?? "").join("\n\n") : ""
 const joinNonEmpty = (a, b) => (a && b ? a + "\n\n" + b : a + b)
@@ -669,12 +675,14 @@ function buildKiro(req, model, profile, budget) {
       if (p?.type === "text") {
         if (p.text) texts.push(p.text)
       } else if (p?.type === "document") texts.push(documentText(p))
-      else if (p?.type === "image") {
-        if (p.source?.type === "base64" && p.source.data) u.images.push({ format: imageFormat(p.source.media_type), source: { bytes: p.source.data } })
-      } else if (p?.type === "tool_result") {
+      else if (p?.type === "image") addImage(u.images, p)
+      else if (p?.type === "tool_result") {
         let out = textOf(p.content)
         if (out.length > RESULT_LIMIT) out = out.slice(0, RESULT_LIMIT) + "\n… (cut)"
         results.push({ toolUseId: toolID(p.tool_use_id), status: p.is_error ? "error" : "success", content: [{ text: out || "(no output)" }] })
+        // a tool's images (a screenshot, Codex's view_image) go with the
+        // message, as Kiro's tool results carry text alone (magpie #369, #1861)
+        if (Array.isArray(p.content)) for (const c of p.content) if (c?.type === "image") addImage(u.images, c)
       }
     }
     u.content = texts.join("\n\n")

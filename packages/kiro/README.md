@@ -76,6 +76,8 @@ request:
   - Tool ids Kiro wouldn't take are rewritten. A tool name over 64
     characters (an MCP plugin's, in Claude Code) is sent shortened with a
     hash and its calls come back under the full name.
+  - A tool's images (a screenshot, Codex's view_image) go with the
+    message that answers the call, as Kiro's tool results hold text alone.
   - Only the latest images are sent.
   - Tools the history used but the request doesn't offer are declared.
 - It turns the AWS event stream Kiro answers with back into Messages'
