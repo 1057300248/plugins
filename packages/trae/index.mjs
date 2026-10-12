@@ -1067,6 +1067,15 @@ class TextTools {
       this.after = true
     }
     if (end) {
+      // an opener the stream ended inside (<tool_call name): a call cut
+      // short, not the answer (plugins#38)
+      const h = this.buf.search(OPEN_HOLD)
+      if (h >= 0 && !quoted(this.sent + text + this.buf.slice(0, h))) {
+        text += this.buf.slice(0, h)
+        this.buf = ""
+        this.sent += text
+        return { text, calls, reasoning, error: CUT_SHORT }
+      }
       text += this.buf
       this.buf = ""
     } else {
@@ -1088,11 +1097,11 @@ class TextTools {
   // gave as <tool_call name="…">.
   block(body, named, end) {
     if (!end && !body.trim()) return { wait: true }
-    const close = body.indexOf(CLOSE)
+    const [close, closeLen] = closeAt(body)
     if (named) {
       if (close < 0 && !end) return { wait: true }
       const region = close >= 0 ? body.slice(0, close) : body
-      const rest = close >= 0 ? body.slice(close + CLOSE.length) : ""
+      const rest = close >= 0 ? body.slice(close + closeLen) : ""
       if (region.trimStart().startsWith("{")) {
         const v = repairedJSON(region.trim())
         if (!v) return { error: close >= 0 ? UNREADABLE : CUT_SHORT }
@@ -1116,7 +1125,7 @@ class TextTools {
         const region = body.slice(ph[0].length, close >= 0 ? close : body.length)
         const p = paramArgs(region, ph[1], this.tools)
         if (close < 0 && !p.closed) return { error: CUT_SHORT }
-        return { call: { name: ph[1], arguments: JSON.stringify(p.args) }, rest: close >= 0 ? body.slice(close + CLOSE.length) : "" }
+        return { call: { name: ph[1], arguments: JSON.stringify(p.args) }, rest: close >= 0 ? body.slice(close + closeLen) : "" }
       }
       const o = objectEnd(body, 0)
       if (o > 0 && !this.bad.has(":" + o)) {
@@ -1128,10 +1137,10 @@ class TextTools {
       }
       // not whole, or not JSON as it stands: read up to a close (a file's
       // content may hold one), or at the end all of it
-      for (let j = close; j >= 0; j = body.indexOf(CLOSE, j + 1)) {
+      for (let [j, n] = [close, closeLen]; j >= 0; [j, n] = closeAt(body, j + 1)) {
         if (this.bad.has("<" + j)) continue
         const v = callJSON(body.slice(0, j))
-        if (v) return { call: { name: String(v.name), arguments: callArgs(v) }, rest: body.slice(j + CLOSE.length) }
+        if (v) return { call: { name: String(v.name), arguments: callArgs(v) }, rest: body.slice(j + n) }
         this.bad.add("<" + j)
       }
       if (!end) return { wait: true }
@@ -1145,7 +1154,7 @@ class TextTools {
     const region = close >= 0 ? body.slice(0, close) : body
     const w = glmCall(region, this.tools)
     // GLM's call, cut short at the end, is still the call
-    if (w) return { call: { name: w.name, arguments: callArgs(w) }, rest: close >= 0 ? body.slice(close + CLOSE.length) : "" }
+    if (w) return { call: { name: w.name, arguments: callArgs(w) }, rest: close >= 0 ? body.slice(close + closeLen) : "" }
     if (/^\s*[\w.:-]{1,128}\s*<arg_key>/.test(body)) return { error: close >= 0 ? UNREADABLE : CUT_SHORT }
     return { text: true }
   }
@@ -1155,9 +1164,18 @@ const CUT_SHORT = "the model's tool call, written as text, was cut short; it is 
 const UNREADABLE = "the model's tool call, written as text, can't be read; it is not sent on as the answer"
 
 // an opener: <tool_call>, one with attributes (<tool_call name="bash">),
-// or <tool_call right before its JSON; and one still being written
-const OPEN_AT = /<tool_call(?:(\s[^<>{}]*)?>|(?=\s*\{))/
-const OPEN_HOLD = /<tool_call(?:\s[^<>{}\n]{0,200})?$/
+// or <tool_call right before its JSON; and one still being written. GLM
+// also writes it without the underscore, <toolcall> (plugins#38)
+const OPEN_AT = /<tool_?call(?:(\s[^<>{}]*)?>|(?=\s*\{))/
+const OPEN_HOLD = /<tool_?call(?:\s[^<>{}\n]{0,200})?$/
+// closeAt is where the next close is from i, </tool_call> or </toolcall>,
+// and its length: [-1, 0] when there is none
+function closeAt(s, i = 0) {
+  const re = /<\/tool_?call>/g
+  re.lastIndex = i
+  const m = re.exec(s)
+  return m ? [m.index, m[0].length] : [-1, 0]
+}
 // DeepSeek's half-and-half call: {"name":"x"} (or its brace or > left
 // out), then <parameter name="k">v</parameter> or Qwen's <parameter=k>
 const PARAM_HEAD = /^\s*\{\s*"name"\s*:\s*"([^"]+)"\s*\}?\s*>?\s*(?=<parameter\b)/
@@ -1303,7 +1321,7 @@ const GLM_ARG = /<arg_key>\s*([\s\S]*?)\s*<\/arg_key>\s*<arg_value>([\s\S]*?)<\/
 // a value that isn't a string. A name alone is a call only to a tool the
 // request has.
 function glmCall(s, tools = []) {
-  s = String(s ?? "").replace(/<\/tool_call>\s*$/, "")
+  s = String(s ?? "").replace(/<\/tool_?call>\s*$/, "")
   const k = s.indexOf("<arg_key>")
   const name = (k < 0 ? s : s.slice(0, k)).trim()
   if (!/^[\w.:-]{1,128}$/.test(name)) return null
@@ -1373,9 +1391,9 @@ const DSML_CLOSE = new RegExp(String.raw`<\s*\/\s*[|｜][\s|｜]*DSML[\s|｜]*in
 const DSML_PARAM = new RegExp(String.raw`<\s*[|｜][\s|｜]*DSML[\s|｜]*parameter\s+name\s*=\s*"([^"]+)"((?:\s+\w+\s*=\s*"[^"]*")*)\s*>([\s\S]*?)` + DSML + String.raw`parameter\s*>`, "g")
 // what is left after a call: blanks, our close, DeepSeek's tags but the
 // next call's
-const LEFTOVER = new RegExp(String.raw`^(?:\s+|<\/tool_calls?>|<tool_calls>|` + DSML + String.raw`(?![\s|｜]*invoke\b)[^<>]*>)+`)
+const LEFTOVER = new RegExp(String.raw`^(?:\s+|<\/tool_?calls?>|<tool_?calls>|` + DSML + String.raw`(?![\s|｜]*invoke\b)[^<>]*>)+`)
 // what text may be the start of, so held back
-const MARKS = [OPEN, CLOSE, "<｜DSML｜", "<|DSML|", "</｜DSML｜", "</|DSML|", '{"reasoning_content"']
+const MARKS = [OPEN, CLOSE, "<toolcall>", "</toolcall>", "<｜DSML｜", "<|DSML|", "</｜DSML｜", "</|DSML|", '{"reasoning_content"']
 // reasoning a model wrote into its text as JSON
 const REASON_AT = /\{\s*"reasoning_content"\s*:/
 const MARK_MAX = Math.max(...MARKS.map((m) => m.length))
