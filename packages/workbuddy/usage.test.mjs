@@ -1,7 +1,7 @@
 // auth.usage tells what magpie's built-in WorkBuddy usage told for the same
 // answers (internal/provider/workbuddy_test.go, workbuddy_ai_test.go).
 import { test, expect, afterAll, beforeAll, afterEach } from "bun:test"
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs"
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { realpathSync } from "node:fs"
 import { join } from "node:path"
@@ -147,6 +147,29 @@ test("a desktop sign-in with the app signed out says why it failed", async () =>
   const m = p.auth.methods.find((x) => x.label.endsWith("desktop's sign-in"))
   const r = await (await m.authorize()).callback()
   expect(r).toEqual({ type: "failed", error: "WorkBuddy AI desktop isn't signed in" })
+})
+
+// plugins#18 (seavenlin, WorkBuddy desktop 5.8.1): a sign-in the app seals
+// at rest read as "isn't signed in", while the app was signed in
+test("a desktop sign-in the app keeps encrypted says so, and that the browser sign-in is the way", async () => {
+  const dir = process.platform === "darwin" ? join(home, "Library", "Application Support", "CodeBuddyExtension")
+    : process.platform === "win32" ? join(home, "AppData", "Local", "CodeBuddyExtension") : join(home, ".local", "share", "CodeBuddyExtension")
+  mkdirSync(join(dir, "Data", "Public", "auth"), { recursive: true })
+  const file = join(dir, "Data", "Public", "auth", "workbuddy-desktop-ai.info")
+  const sealed = { $wbEncrypted: 1, envelope: "AAAA" }
+  const info = JSON.stringify({ auth: { accessToken: sealed, refreshToken: sealed, expiresAt: Date.now() + 3600_000 }, account: { uid: "u9", nickname: "x" } })
+  writeFileSync(file, info)
+  const want = 'WorkBuddy AI desktop keeps its sign-in encrypted (WorkBuddy 5.6 and later), which magpie can\'t read; sign in with "WorkBuddy AI account (browser)" instead'
+  const p = await WorkBuddyAIAuthPlugin({ client: {} })
+  const m = p.auth.methods.find((x) => x.label.endsWith("desktop's sign-in"))
+  expect(await (await m.authorize()).callback()).toEqual({ type: "failed", error: want })
+  // one signed in before the app sealed it: its usage and chats say the same
+  const auth = { type: "oauth", access: "", refresh: "", expires: 0, source: "desktop", uid: "u9" }
+  expect((await usageOf(WorkBuddyAIAuthPlugin, auth, { auth: { set: async () => {} } })).error).toBe(want)
+  const opts = await p.auth.loader(async () => auth)
+  await expect(opts.fetch(opts.baseURL + "/chat/completions", { method: "POST", body: "{}" })).rejects.toThrow(want)
+  expect(readFileSync(file, "utf8")).toBe(info)
+  rmSync(file)
 })
 
 // Each model carries the credits WorkBuddy's picker shows by it, as

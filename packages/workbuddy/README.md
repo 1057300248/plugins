@@ -24,7 +24,8 @@ The package exports `WorkBuddyAuthPlugin` (`workbuddy`) and
   - Windows: `~/AppData/Local/CodeBuddyExtension/…`
   - Linux: `~/.local/share/CodeBuddyExtension/…`
 
-  A sign-in the app keeps encrypted can't be read, and this way fails.
+  WorkBuddy 5.6 and later keep the sign-in encrypted, which only the app
+  opens, so this way fails there and says so: use the browser sign-in.
 
 A browser sign-in is kept as an OpenCode `oauth` auth: the access and
 refresh tokens, their expiry, the user id and the domain; desktop's as a

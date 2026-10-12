@@ -931,6 +931,19 @@ function readDesktop(site) {
   }
 }
 
+// notDesktop says why there is no desktop sign-in to use: WorkBuddy 5.6
+// and later seal its tokens at rest ({$wbEncrypted: 1, envelope}), which
+// only the app itself opens (plugins#18), so the browser sign-in is the way;
+// else the app isn't signed in.
+function notDesktop(site) {
+  try {
+    const t = JSON.parse(readFileSync(desktopFile(site), "utf8"))?.auth ?? {}
+    if (t.accessToken?.$wbEncrypted || t.refreshToken?.$wbEncrypted)
+      return `${site.name} desktop keeps its sign-in encrypted (WorkBuddy 5.6 and later), which magpie can't read; sign in with "${site.name} account (browser)" instead`
+  } catch {}
+  return `${site.name} desktop isn't signed in`
+}
+
 // desktopSignIn uses the account WorkBuddy desktop is signed in to: nothing
 // is copied (a copied refresh token would be the app's and the plugin's
 // both, and the first to use it would sign the other out); its file is
@@ -942,7 +955,7 @@ function desktopSignIn(site) {
     method: "auto",
     async callback() {
       const d = readDesktop(site)
-      if (!d) return { type: "failed", error: `${site.name} desktop isn't signed in` }
+      if (!d) return { type: "failed", error: notDesktop(site) }
       return { type: "success", refresh: "", access: "", expires: 0, source: "desktop", accountId: d.name || site.name, uid: d.uid }
     },
   }
@@ -957,7 +970,7 @@ const desktopHeld = new Map()
 async function current(site, client, auth) {
   if (auth?.source !== "desktop") return fresh(site, client, auth)
   const d = readDesktop(site)
-  if (!d) throw new Error(`${site.name} desktop isn't signed in`)
+  if (!d) throw new Error(notDesktop(site))
   const k = site.id + "|" + d.uid
   const h = desktopHeld.get(k)
   const a = await fresh(site, null, h && h.expires >= d.expires ? h : d)
@@ -1425,4 +1438,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
+export const _internal = { notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
