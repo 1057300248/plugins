@@ -421,11 +421,12 @@ function windowsOf(d, efforts) {
 // grok-4.7@500k is grok-4.7 at 500000 tokens. The header is what the CLI
 // sends as x-grok-context-window. The proxy serves up to its largest
 // window either way and refuses past it; the header names the window the
-// caller asked to compact against.
+// caller asked to compact against. A window no multiple of 1000 is named
+// by its digits alone (grok-4.7@131072), as labelOf writes it.
 function modelOf(id) {
-  const at = typeof id === "string" ? id.match(/^(.*)@(\d+)k$/) : null
-  if (!at) return { model: id, window: 0 }
-  return { model: at[1], window: Number(at[2]) * 1000 }
+  const at = typeof id === "string" ? id.match(/^(.+)@(\d+)(k?)$/) : null
+  if (!at || !(Number(at[2]) > 0)) return { model: id, window: 0 }
+  return { model: at[1], window: Number(at[2]) * (at[3] ? 1000 : 1) }
 }
 
 // ---- sign-in ------------------------------------------------------------------
