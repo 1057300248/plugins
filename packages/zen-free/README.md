@@ -3,6 +3,13 @@
 OpenCode Zen's free models in magpie and OpenCode. Provider id:
 `opencode-zen-free`.
 
+> **Note (2026-10-13):** OpenCode's free tier now works only inside
+> OpenCode itself. Requests from anywhere else, magpie included, get
+> 403 FreeTierError ("OpenCode's free tier can only be used from within
+> OpenCode"). OpenCode limits it on purpose, and this plugin doesn't work
+> around that. To use Zen's models in magpie, add an OpenCode Zen paid
+> key or OpenCode Go as a provider instead.
+
 ## Install
 
 ```sh
