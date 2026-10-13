@@ -1056,6 +1056,25 @@ function usageOf(sum, plan) {
   return out
 }
 
+// enterpriseUsageOf is an enterprise (team) account's credits, from
+// /billing/meter/get-enterprise-user-usage, the meter WorkBuddy's own usage
+// page (www.workbuddy.cn/profile/usage) reads for one (magpie #1904,
+// CnsMaple): the resource summary answers such an account with no
+// packages at all. It counts the cycle's credits flat — credit used of
+// limitNum — and when the cycle began and resets (UTC+8). null when it
+// grants none.
+function enterpriseUsageOf(u) {
+  const limit = capacity(u?.limitNum)
+  if (!(limit > 0)) return null
+  const used = capacity(u?.credit)
+  const w = { name: "Credits", used: (100 * used) / limit, display: `${compact(used)} / ${compact(limit)}`, amount: used, limit, unit: "credits" }
+  const at = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(v.trim()) ? Date.parse(v.trim().replace(" ", "T") + "+08:00") : 0)
+  const reset = at(u?.cycleResetTime), start = at(u?.cycleStartTime)
+  if (reset > 0) w.resetsAt = new Date(reset).toISOString()
+  if (reset > start && start > 0) w.span = (reset - start) / 1000
+  return w
+}
+
 // The packages' codes, as WorkBuddy's own client lists them when it asks
 // for each package's credits (its COMMODITY_CODES): the API refuses a
 // detail list without them (10001 "PackageCodes required").
@@ -1325,6 +1344,17 @@ function makePlugin(site) {
           // the meter has no /v2 prefix, on either site
           const sum = await meter(site, a, "/billing/meter/get-user-resource-summary")
           const out = usageOf(sum, auth.plan)
+          // an enterprise account's summary has no packages: its credits
+          // are the enterprise meter's (#1904). A personal account's
+          // refusal of it (10001 "uid or enterpriseID is empty") leaves
+          // the card as the summary said.
+          if (!out.windows.length) {
+            let ent = null
+            try {
+              ent = enterpriseUsageOf(await meter(site, a, "/billing/meter/get-enterprise-user-usage"))
+            } catch {}
+            if (ent) return { plan: auth.plan || "Enterprise", windows: [ent], signIn: "kept" }
+          }
           // when the credits left run out, for routing to spend them first;
           // a list that can't be read leaves it unknown, the card stands
           const credits = out.windows.find((w) => w.name === "Credits")
@@ -1438,4 +1468,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
+export const _internal = { enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }

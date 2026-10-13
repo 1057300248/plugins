@@ -309,3 +309,72 @@ test("a detail list that can't be read leaves the card as it was", async () => {
   expect(u.error).toBeUndefined()
   expect(u.windows[0]).toEqual({ name: "Credits", used: 100 * 17.6 / 2250, display: "17.6 / 2250", amount: 17.6, limit: 2250, unit: "credits" })
 })
+
+// magpie #1904 (CnsMaple): an enterprise account's resource summary has no
+// packages, and its credits are the enterprise meter's, which WorkBuddy's
+// own usage page reads. The two answers below are the reporter's, byte for
+// byte, from one token at one moment.
+const ENT_SUMMARY = `{
+  "code": 0,
+  "msg": "OK",
+  "data": {
+    "Packages": [],
+    "SubscriptionPackageCode": "",
+    "SubscriptionPackageName": "",
+    "IsPaidUser": false,
+    "IsProtectedPriceUser": false
+  }
+}`
+const ENT_USAGE = `{
+  "code": 0,
+  "msg": "OK",
+  "data": {
+    "credit": 196.13,
+    "cycleStartTime": "2026-10-08 00:00:00",
+    "cycleEndTime": "2026-11-08 23:59:59",
+    "limitNum": 2000,
+    "cycleResetTime": "2026-11-09 00:00:00"
+  }
+}`
+// and a personal account's answer to the enterprise meter, from a real
+// WorkBuddy AI Pro account on 2026-10-13
+const PERSONAL_ENT = `{"code":10001,"msg":"uid or enterpriseID is empty","requestId":"36dd0f64-cb93-41e1-a964-9e3c87fea235"}`
+
+test("an enterprise account's credits are the enterprise meter's, as WorkBuddy's usage page reads them (magpie #1904)", async () => {
+  const calls = serve({
+    "/billing/meter/get-user-resource-summary": () => new Response(ENT_SUMMARY),
+    "/billing/meter/get-enterprise-user-usage": () => new Response(ENT_USAGE),
+  })
+  const auth = { type: "oauth", access: "ent-access", refresh: "r", expires: later(), uid: "u9", domain: "www.workbuddy.cn", enterpriseId: "ent-1" }
+  expect(await usageOf(WorkBuddyAuthPlugin, auth)).toEqual({ signIn: "kept", plan: "Enterprise", windows: [{
+    name: "Credits", used: (100 * 196.13) / 2000, display: "196.13 / 2000", amount: 196.13, limit: 2000, unit: "credits",
+    resetsAt: "2026-11-08T16:00:00.000Z", span: 32 * 86400 }] })
+  const ent = calls.find((c) => c.url.pathname === "/billing/meter/get-enterprise-user-usage")
+  expect(ent.init.method).toBe("POST")
+  expect(ent.init.body).toBe("{}")
+  expect(Object.fromEntries(["authorization", "x-user-id", "x-domain", "x-enterprise-id"].map((h) => [h, ent.headers.get(h)])))
+    .toEqual({ authorization: "Bearer ent-access", "x-user-id": "u9", "x-domain": "www.workbuddy.cn", "x-enterprise-id": "ent-1" })
+})
+
+test("a personal account with no credits isn't given the enterprise's, and its refusal isn't the card's error", async () => {
+  serve({
+    "/billing/meter/get-user-resource-summary": () => new Response(ENT_SUMMARY),
+    "/billing/meter/get-enterprise-user-usage": () => new Response(PERSONAL_ENT, { status: 400 }),
+  })
+  const auth = { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u" }
+  expect(await usageOf(WorkBuddyAuthPlugin, auth)).toEqual({ signIn: "kept", plan: "Free", windows: [] })
+})
+
+test("a personal account with credits never asks the enterprise meter", async () => {
+  const calls = serve({ "/billing/meter/get-user-resource-summary": () => ok(PAID) })
+  const auth = { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u" }
+  expect((await usageOf(WorkBuddyAuthPlugin, auth)).windows[0].display).toBe("2500 / 10000")
+  expect(calls.some((c) => c.url.pathname === "/billing/meter/get-enterprise-user-usage")).toBe(false)
+})
+
+test("enterpriseUsageOf: no limit, no window; times it can't read are left out", () => {
+  expect(_internal.enterpriseUsageOf({ credit: 3, limitNum: 0 })).toBe(null)
+  expect(_internal.enterpriseUsageOf(null)).toBe(null)
+  expect(_internal.enterpriseUsageOf({ credit: "12.5", limitNum: "100", cycleResetTime: "soon" }))
+    .toEqual({ name: "Credits", used: 12.5, display: "12.5 / 100", amount: 12.5, limit: 100, unit: "credits" })
+})

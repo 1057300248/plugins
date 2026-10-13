@@ -134,6 +134,12 @@ client reads. The daily Free Plan slice isn't counted: it ends at the same
 midnight on every account. magpie's smart routing spends the account whose
 credits run out first.
 
+An enterprise (team) account's resource summary lists no packages. Its
+credits are read from the enterprise meter
+(`/billing/meter/get-enterprise-user-usage`), the one WorkBuddy's own usage
+page reads: the cycle's credits used of its limit, and when the cycle
+resets (magpie #1904).
+
 ## Not here
 
 magpie's built-in WorkBuddy does more than this package:
