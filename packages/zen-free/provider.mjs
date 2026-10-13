@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   PROVIDER,
   SDK,
@@ -16,7 +16,9 @@ const DOCS =
   "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/zen.mdx";
 const PATHS = { chat: "/chat/completions", responses: "/responses", anthropic: "/messages" };
 const CORE_TOOLS = ["bash", "edit", "glob", "grep", "read"];
-const OPENCODE_VERSION = "1.18.34";
+const OPENCODE_VERSION = "1.19.0";
+// What OpenCode 1.19.0 sends as its User-Agent, ai-sdk and Bun included.
+const USER_AGENT = `opencode/${OPENCODE_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`;
 // How long a request for a model the last list didn't have waits before it
 // asks Zen's list again: a model Zen made free since is served at once,
 // and a model typed in by hand doesn't ask the list on every request.
@@ -82,10 +84,45 @@ function normalizeTools(body, protocol) {
   return { declared };
 }
 
-function sessionID(headers, body) {
+const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+let lastStamp = 0;
+let counter = 0;
+
+// An id the way OpenCode makes one (packages/schema/src/identifier.ts):
+// 12 hex of Date.now() * 0x1000 + a per-millisecond counter (bit-inverted
+// for a session, so newer sorts first), then 14 random base62 characters.
+// Zen's free tier checks a session id has this shape, a small counter
+// included, and answers 403 FreeTierError to one that doesn't (#100).
+export function opencodeID(prefix, descending, now = Date.now()) {
+  if (now !== lastStamp) {
+    lastStamp = now;
+    counter = 0;
+  }
+  counter++;
+  const current = BigInt(now) * 0x1000n + BigInt(counter);
+  const value = (descending ? ~current : current) & 0xffffffffffffn;
+  const random = randomBytes(14);
+  let tail = "";
+  for (const byte of random) tail += ALPHABET[byte % 62];
+  return `${prefix}_${value.toString(16).padStart(12, "0")}${tail}`;
+}
+
+// A session id OpenCode itself could have made: its counter (the low 12
+// bits, inverted) is small. A hash cut to the same shape isn't one.
+export function realSessionID(value) {
+  const match = /^ses_[0-9a-f]{9}([0-9a-f]{3})[0-9A-Za-z]{14}$/.exec(value ?? "");
+  return !!match && 0xfff - Number.parseInt(match[1], 16) < 16;
+}
+
+// One made-up session per conversation, so its turns keep one session.
+const SESSIONS = new Map();
+const KEEP_SESSIONS = 1000;
+
+export function sessionID(headers, body) {
   let signal;
   for (const name of [
     "x-opencode-session",
+    "x-opencode-session-id",
     "x-session-affinity",
     "x-session-id",
     "conversation-id",
@@ -96,24 +133,25 @@ function sessionID(headers, body) {
     }
   }
   if (!signal && typeof body.metadata?.session_id === "string") signal = body.metadata.session_id;
+  if (realSessionID(signal)) return signal;
   if (!signal) {
     const messages = body.messages ?? body.input;
     const first = Array.isArray(messages)
       ? messages.find((message) => message.role === "user")?.content
       : messages;
-    signal = first ? JSON.stringify(first) : randomUUID();
+    if (!first) return opencodeID("ses", true);
+    signal = JSON.stringify(first);
   }
-  if (/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/.test(signal)) return signal;
-  // Keep conversation affinity using OpenCode's canonical session format.
-  const hash = createHash("sha256").update(`ses\0${signal}`).digest("hex");
-  let value = BigInt(`0x${hash.slice(12, 32)}`);
-  let suffix = "";
-  const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-  for (let i = 0; i < 14; i++) {
-    suffix = alphabet[Number(value % 62n)] + suffix;
-    value /= 62n;
+  const key = createHash("sha256").update(`ses\0${signal}`).digest("hex");
+  let session = SESSIONS.get(key);
+  if (session) {
+    SESSIONS.delete(key);
+  } else {
+    session = opencodeID("ses", true);
+    if (SESSIONS.size >= KEEP_SESSIONS) SESSIONS.delete(SESSIONS.keys().next().value);
   }
-  return `ses_${hash.slice(0, 12)}${suffix}`;
+  SESSIONS.set(key, session);
+  return session;
 }
 
 async function server(_input, options = {}) {
@@ -258,9 +296,9 @@ async function server(_input, options = {}) {
             }
             headers.set("content-type", "application/json");
             headers.set("accept", "text/event-stream");
-            headers.set("user-agent", `opencode/${OPENCODE_VERSION}`);
+            headers.set("user-agent", USER_AGENT);
             headers.set("x-opencode-client", "cli");
-            headers.set("x-opencode-request", `req_${randomUUID().replaceAll("-", "")}`);
+            headers.set("x-opencode-request", opencodeID("msg", false));
             if (!headers.has("x-opencode-project")) {
               const project = _input?.project;
               headers.set(
@@ -269,7 +307,12 @@ async function server(_input, options = {}) {
               );
             }
             const session = sessionID(headers, body);
-            for (const name of ["x-session-id", "x-opencode-session", "x-session-affinity"])
+            for (const name of [
+              "x-session-id",
+              "x-opencode-session",
+              "x-opencode-session-id",
+              "x-session-affinity",
+            ])
               headers.set(name, session);
             if (protocol === "anthropic") {
               headers.set("x-api-key", "public");

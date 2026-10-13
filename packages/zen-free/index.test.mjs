@@ -171,7 +171,10 @@ for (const [input, supplied, expected] of [
     });
     await response.text();
     assert.equal(state.calls.at(-1).headers["x-opencode-project"], expected);
-    assert.equal(state.calls.at(-1).headers["user-agent"], "opencode/1.18.34");
+    assert.equal(
+      state.calls.at(-1).headers["user-agent"],
+      "opencode/1.19.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+    );
   });
 }
 
@@ -286,10 +289,11 @@ test("forces upstream streaming, preserves existing tools and returns the SSE bo
   assert.match(await response.text(), /\[DONE\]/);
   const sent = state.calls.at(-1);
   assert.equal(sent.headers.authorization, "Bearer public");
-  assert.match(sent.headers["x-opencode-session"], /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+  assert.match(sent.headers["x-opencode-session"], /^ses_[0-9a-f]{9}ff[0-9a-f][0-9A-Za-z]{14}$/);
   assert.equal(sent.headers["x-session-affinity"], sent.headers["x-opencode-session"]);
   assert.equal(sent.headers["x-session-id"], sent.headers["x-opencode-session"]);
-  assert.ok(sent.headers["x-opencode-request"]);
+  assert.equal(sent.headers["x-opencode-session-id"], sent.headers["x-opencode-session"]);
+  assert.match(sent.headers["x-opencode-request"], /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   assert.equal(sent.body.stream, true);
   assert.equal(sent.body.stream_options.include_usage, true);
   assert.deepEqual(sent.body.tools[0], bash);
