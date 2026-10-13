@@ -63,9 +63,9 @@ Each model is served on the one API droid uses for it:
 
 | API | Models |
 |---|---|
-| Anthropic Messages (`/api/llm/a`) | Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Sonnet 5.5, Sonnet 5, Sonnet 4.6, Haiku 4.5, MiniMax M2.7 |
+| Anthropic Messages (`/api/llm/a`) | Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Sonnet 5.5, Sonnet 5, Sonnet 4.6, Haiku 5.5, Haiku 4.5, MiniMax M2.7 |
 | OpenAI Responses (`/api/llm/o/v1`) | GPT-6.1 Sol, GPT-6 Sol/Astra/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, GPT-5.3-Codex, Grok 4.7, Grok 4.6 |
-| Chat completions (`/api/llm/o/v1`) | GLM-5.3, GLM-5.3-Flash, GLM-5.2, Kimi K3, DeepSeek V4.1 Flash, Qwen3.8 Max, MiniMax M3, Mistral Medium 3.5, Nemotron 3 Ultra |
+| Chat completions (`/api/llm/o/v1`) | GLM-5.3, GLM-5.3-Flash, GLM-5.2, Kimi K3, DeepSeek V4.1 Flash, Qwen3.8 Max, MiniMax M3, Mistral Large 4, Mistral Medium 3.5, Nemotron 3 Ultra |
 
 Reasoning efforts are the variants droid offers for each model. DeepSeek V4.1
 Flash, Kimi K3 and GLM-5.2 have `none`, droid's "off": they stop thinking.

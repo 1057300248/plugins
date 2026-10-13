@@ -35,7 +35,10 @@ const E4 = ["low", "medium", "high", "xhigh"]
 // The models droid's /model picker offers, less Gemini's (sent on a route of
 // Factory's own) and auto (droid picks it client side): id, name, the wire
 // droid sends it on, the vendor it names in x-api-provider, context, output,
-// reasoning efforts, images.
+// reasoning efforts, images. Haiku 5.5 and Mistral Large 4 are droid
+// 0.240.0's (models.test.mjs reads its registry); GPT-6 Astra Ultra Fast,
+// new there too, stays out: droid offers it only after the user accepts
+// Factory's high-cost terms for it (explicitOptInRequirement).
 const MODELS = [
   ["claude-fable-5.1", "Fable 5.1", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-fable-5", "Fable 5", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
@@ -45,6 +48,7 @@ const MODELS = [
   ["claude-sonnet-5-5", "Sonnet 5.5", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
   ["claude-sonnet-5", "Sonnet 5", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
   ["claude-sonnet-4-6", "Sonnet 4.6", ANTHROPIC, "anthropic", 931000, 64000, ["low", "medium", "high", "max"], true],
+  ["claude-haiku-5-5", "Haiku 5.5", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
   ["claude-haiku-4-5-20251001", "Haiku 4.5", ANTHROPIC, "anthropic", 0, 0, ["low", "medium", "high"], true],
   ["gpt-6.1-sol", "GPT-6.1 Sol", RESPONSES, "openai", 1050000, 128000, E5, true],
   ["gpt-6-sol", "GPT-6 Sol", RESPONSES, "openai", 1050000, 128000, E6, true],
@@ -69,6 +73,7 @@ const MODELS = [
   ["qwen3.8-max", "Qwen3.8 Max", CHAT, "fireworks", 262144, 131072, ["low", "medium", "xhigh"], false],
   ["minimax-m3", "MiniMax M3", CHAT, "fireworks", 512000, 64000, ["high"], true],
   ["minimax-m2.7", "MiniMax M2.7", ANTHROPIC, "fireworks", 196600, 64000, ["high"], false],
+  ["mistral-large-4", "Mistral Large 4", CHAT, "mistral", 524288, 64000, ["high"], true],
   ["mistral-medium-3.5", "Mistral Medium 3.5", CHAT, "mistral", 256000, 64000, ["high"], true],
   ["nemotron-3-ultra", "Nemotron 3 Ultra", CHAT, "baseten", 202000, 65536, ["high"], false],
 ].map(([id, name, wire, upstream, context, output, efforts, images]) => ({ id, name, wire, upstream, context, output, efforts, images }))
