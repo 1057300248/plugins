@@ -1022,6 +1022,7 @@ class TextTools {
     this.tools = tools
     this.sent = "" // the text given out so far, to tell a block in code from a call
     this.bad = new Set() // where the waiting block's JSON was tried and not read, not tried again
+    this.mark = 0 // where in sent the text after the last call starts
   }
   push(s, end = false) {
     this.buf += s
@@ -1044,6 +1045,27 @@ class TextTools {
       const i = om ? om.index : -1
       const d = this.buf.search(DSML_AT)
       const r = this.buf.search(REASON_AT)
+      const sm = this.buf.match(STRAY_AT)
+      const s = sm ? sm.index : -1
+      if (s >= 0 && [i, d, r].every((x) => x < 0 || s < x)) {
+        // a close with no call open, with what GLM left before it
+        // (}}</tool_call>, magpie#1945): not the answer, dropped; in code,
+        // shown
+        const head = this.buf.slice(0, s)
+        // only a tail: a close with nothing before it since the last call
+        // (or the start), or with GLM's braces, quotes or > right before
+        // it; a close a sentence names in passing stays
+        const tail = /^[}\]"'>]/.test(sm[0]) || !(this.sent + text + head).slice(this.mark).trim()
+        if (!tail || quoted(this.sent + text + head)) {
+          text += this.buf.slice(0, s + sm[0].length)
+          this.buf = this.buf.slice(s + sm[0].length)
+          continue
+        }
+        text += head
+        this.buf = this.buf.slice(s + sm[0].length)
+        this.after = true
+        continue
+      }
       if (r >= 0 && (i < 0 || r < i) && (d < 0 || r < d)) {
         const o = objectEnd(this.buf, r)
         if (o === -1 && !end) {
@@ -1095,6 +1117,7 @@ class TextTools {
           stop = body.length
         }
         calls.push({ name: inv[1], arguments: dsmlArgs(body.slice(0, stop)) })
+        this.mark = this.sent.length + text.length
         this.buf = body.slice(c && c.index === stop ? stop + c[0].length : stop)
         this.after = true
         continue
@@ -1136,6 +1159,7 @@ class TextTools {
         return { text, calls, reasoning, error: b.error }
       }
       calls.push(b.call)
+      this.mark = this.sent.length + text.length
       this.buf = b.rest
       this.after = true
     }
@@ -1156,6 +1180,9 @@ class TextTools {
       const at = [this.buf.search(OPEN_AT), this.buf.search(OPEN_HOLD), this.buf.search(DSML_AT), this.buf.search(REASON_AT)].filter((x) => x >= 0)
       let keep = at.length ? this.buf.length - Math.min(...at) : 0
       if (!keep) for (let k = Math.min(MARK_MAX - 1, this.buf.length); k > 0; k--) if (MARKS.some((m) => m.startsWith(this.buf.slice(-k)))) { keep = k; break }
+      // and braces, brackets, quotes or a > a close may still come after
+      const sh = this.buf.slice(0, this.buf.length - keep).match(STRAY_HOLD)
+      if (sh) keep = this.buf.length - sh.index
       text += this.buf.slice(0, this.buf.length - keep)
       this.buf = this.buf.slice(this.buf.length - keep)
     }
@@ -1205,8 +1232,27 @@ class TextTools {
         const v = callJSON(body.slice(0, o))
         // a name alone may have its parameters still to come
         if (v && !end && Object.keys(v).length === 1 && "<parameter".startsWith(body.slice(o).replace(/^\s*>?\s*/, ""))) return { wait: true }
-        if (v) return { call: { name: String(v.name), arguments: callArgs(v) }, rest: body.slice(o) }
-        this.bad.add(":" + o)
+        if (v) {
+          // what follows the object up to the close: GLM leaves braces,
+          // brackets, quotes or a > of its own there (}}</tool_call>,
+          // "></tool_call>, magpie#1945), dropped with the close; held
+          // while only those have come
+          const tail = body.slice(o)
+          const junk = tail.match(TAIL_JUNK)[0]
+          const next = tail.slice(junk.length)
+          const call = { name: String(v.name), arguments: callArgs(v) }
+          if (!end && (!next || ["</tool_call>", "</toolcall>"].some((k) => k.startsWith(next)))) return { wait: true }
+          const [c, n] = closeAt(next)
+          if (c === 0) return { call, rest: next.slice(n) }
+          // after blanks alone, or with no close to come: the call, and
+          // what follows read on as before. Other text before the close
+          // right after the object means the object ended early, at a
+          // quote inside a string left unescaped: that cut is wrong (a
+          // heredoc's command cut short, magpie#1945), so it is read up to
+          // the close below, or not at all
+          if (!/\S/.test(junk) && !/^[^\s<]/.test(next)) return { call, rest: tail }
+          if (close < 0 && end) return { call, rest: tail }
+        } else this.bad.add(":" + o)
       }
       // not whole, or not JSON as it stands: read up to a close (a file's
       // content may hold one), or at the end all of it
@@ -1241,6 +1287,14 @@ const UNREADABLE = "the model's tool call, written as text, can't be read; it is
 // also writes it without the underscore, <toolcall> (plugins#38)
 const OPEN_AT = /<tool_?call(?:(\s[^<>{}]*)?>|(?=\s*\{))/
 const OPEN_HOLD = /<tool_?call(?:\s[^<>{}\n]{0,200})?$/
+// what GLM leaves between a call's JSON and its close: blanks, closing
+// braces and brackets, quotes, a > (magpie#1945)
+const TAIL_JUNK = /^[\s}\]"'>]*/
+// a close with no call open, and that leftover before it: the tail of a
+// call Trae's service read itself, or of one already read (magpie#1945)
+const STRAY_AT = /[}\]"'>]*\s*<\/tool_?calls?>/
+// the end of text that may be such a tail still being written
+const STRAY_HOLD = /[}\]"'>][\s}\]"'>]*$/
 // closeAt is where the next close is from i, </tool_call> or </toolcall>,
 // and its length: [-1, 0] when there is none
 function closeAt(s, i = 0) {
