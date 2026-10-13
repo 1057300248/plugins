@@ -46,6 +46,23 @@ authorization page: `device_id` (19 digits) and `machine_id` (32 hex). Every
 request then sends that same device. The relays saw requests dropped when the
 device was new each time.
 
+### Enterprise (SaaS) accounts
+
+Since 0.2.10 the authorization page also offers Trae's enterprise (SaaS / SSO)
+sign-in; before, the plugin asked the page to hide it (`hide_saas_login`), so
+an enterprise subscription could only sign in as a personal account. A host
+the sign-in names for the account is kept when it is an https host on Trae's
+own domains (`trae.cn`, `trae.ai`, `mchost.guru`): a model host other than the
+consumer site's own (`www`, `api`, `grow…`) takes the account's model
+requests, and a token host the callback names (`authHost`) takes its
+renewals. Any other host is ignored and the consumer hosts are used, as for a
+personal account, which is unchanged. The account's tenant and login-type
+fields are kept with the sign-in; nothing sends them.
+
+**Not tried with a real enterprise account.** Which hosts and fields an
+enterprise sign-in sends back is not known yet; if yours doesn't work, open an
+issue with what the sign-in page showed.
+
 ### The international realm's region
 
 Trae Global has two deployments. The sign-in's `AIRegion` (or a US auth host

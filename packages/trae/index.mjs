@@ -79,11 +79,19 @@ const SITES = {
     // the model host for an account: Trae CN's own hosts serve no models,
     // so only a host that is one is taken, else the one gateway
     apiOf: (a) => {
-      const h = String(a?.api ?? "").replace(/\/+$/, "")
-      return /mchost\.guru|trae-api-/i.test(h) ? h : SITES["trae-cn"].hosts.api
+      const h = traeHost(a?.api)
+      return h && SITES["trae-cn"].modelHost(h) ? h : SITES["trae-cn"].hosts.api
     },
-    // whether a host named by a sign-in is one of the model hosts
-    modelHost: (h) => /mchost\.guru|trae-api-/i.test(String(h ?? "")),
+    // whether a host named by a sign-in is one of the model hosts: an https
+    // host on mchost.guru or named trae-api-…, as the consumer gateway is,
+    // or another trae.cn host than the consumer site's own (www, api,
+    // grow…), which an enterprise (SaaS) sign-in may name for its tenant
+    modelHost: (h) => {
+      const t = traeHost(h)
+      if (!t) return false
+      const n = new URL(t).hostname
+      return /(^|\.)mchost\.guru$|^trae-api-/i.test(n) || (/\.trae\.cn$/i.test(n) && !/^(www|api|grow[^.]*)\./i.test(n))
+    },
     // ownPage: url is one of Trae CN's own JSON pages on api.trae.cn
     // (/trae/api/…: the daily check-in, credits), which the account's fetch
     // sends as the account rather than as a chat
@@ -166,15 +174,22 @@ const SITES = {
     // the model host: the account's region (or a US host the sign-in named)
     // selects the US deployment, else the SG one
     apiOf: (a) => {
-      const h = String(a?.api ?? "").replace(/\/+$/, "")
+      const h = traeHost(a?.api)
+      const n = h ? new URL(h).hostname : ""
       const region = String(a?.region ?? "").toUpperCase()
-      if (/coreva/i.test(h) || /api-us(?:[-.]|$)/i.test(h) || /^US(?:[-_ ]|$)/.test(region)) return SITES["trae-global"].hosts.us
-      if (/coresg/i.test(h)) return h
+      if (/coreva/i.test(n) || /api-us(?:[-.]|$)/i.test(n) || /^US(?:[-_ ]|$)/.test(region)) return SITES["trae-global"].hosts.us
+      if (/coresg/i.test(n)) return h
+      // another trae.ai host than the site's own (www, api-…, grow…): one an
+      // enterprise (SaaS) sign-in named for its tenant
+      if (/\.trae\.ai$/i.test(n) && !/^(www\.|api[-.]|grow)/i.test(n)) return h
       return SITES["trae-global"].hosts.api
     },
     // a sign-in names a host of Trae's, which can be an auth host
     // (api-us-east), not the chat host
-    modelHost: (h) => /trae\.ai/i.test(String(h ?? "")),
+    modelHost: (h) => {
+      const t = traeHost(h)
+      return !!t && /(^|\.)trae\.ai$/i.test(new URL(t).hostname)
+    },
     // Trae Global serves no own JSON pages through the account's fetch
     ownPage: () => false,
     // the account's region, from the sign-in's user info
@@ -211,6 +226,46 @@ const SITES = {
       },
     },
   },
+}
+
+// traeHost is a host a sign-in named, when it is a well-formed https one
+// on Trae's own domains (no port, no credentials), as origin plus any path;
+// "" for anything else, which is then not taken
+const TRAE_DOMAINS = ["trae.cn", "trae.ai", "mchost.guru"]
+function traeHost(h) {
+  try {
+    const u = new URL(String(h ?? "").trim())
+    if (u.protocol !== "https:" || u.username || u.password || u.port || u.search || u.hash) return ""
+    const n = u.hostname.toLowerCase()
+    if (!TRAE_DOMAINS.some((d) => n === d || n.endsWith("." + d))) return ""
+    return (u.origin + u.pathname).replace(/\/+$/, "")
+  } catch {
+    return ""
+  }
+}
+
+// authHostOf is the host a sign-in named for its tokens, when it named one
+// on the site's own domain (an enterprise's may differ from the consumer
+// one); "" when it named none, and the site's own is used
+function authHostOf(h, site) {
+  const t = traeHost(h)
+  if (!t) return ""
+  const n = new URL(t).hostname
+  return n === site.webHost || n.endsWith("." + site.webHost) ? t : ""
+}
+
+// accountOf keeps the account fields of the sign-in's user info that say
+// what kind of account it is (tenant, enterprise, login type), plain values
+// only and never anything that looks like a secret, for later use; nothing
+// sends them
+function accountOf(info) {
+  const out = {}
+  for (const [k, v] of Object.entries(info ?? {})) {
+    if (!/tenant|enterprise|saas|login|org|team|sso|^ent|usertype|accounttype/i.test(k)) continue
+    if (/token|secret|key|password|cookie|session|jwt/i.test(k)) continue
+    if (v === null || ["string", "number", "boolean"].includes(typeof v)) out[k] = v
+  }
+  return out
 }
 
 const SIGN_IN_TIMEOUT = 10 * 60 * 1000
@@ -301,6 +356,11 @@ function toAuth(s, site) {
     // the model host the sign-in named, if it named one
     ...(site.modelHost(s.api) ? { api: s.api } : {}),
     ...(s.region ? { region: s.region } : {}),
+    // the host the sign-in named, its own token host if it named one, and
+    // what kind of account it is (an enterprise one's tenant), kept as given
+    ...(traeHost(s.host) ? { host: traeHost(s.host) } : {}),
+    ...(authHostOf(s.authHost, site) ? { authHost: authHostOf(s.authHost, site) } : {}),
+    ...(s.account && Object.keys(s.account).length ? { account: s.account } : {}),
   }
 }
 
@@ -319,6 +379,9 @@ function fromAuth(auth, site) {
     devicePrivateKey: auth.devicePrivateKey || "",
     api: auth.api || "",
     region: site.regionOf(auth),
+    host: auth.host || "",
+    authHost: authHostOf(auth.authHost, site),
+    account: auth.account && typeof auth.account === "object" ? auth.account : {},
   }
 }
 
@@ -405,6 +468,7 @@ async function exchange(refresh, clientId, site, host = site.hosts.auth) {
       name: String(info.ScreenName ?? info.screenName ?? ""),
       api: info.Host ?? "",
       region: site.regionOf(info),
+      account: accountOf(info),
     }
   }
   const e = errorOf(text)
@@ -495,12 +559,14 @@ async function boundExchange(a, site, host = site.hosts.auth) {
 // before 0.2.3 (exchange). A device key made for the account goes with
 // either, so the next renewal signs with the same one.
 async function renewal(a, site) {
-  if (!site.deviceExchange) return exchange(a.refresh, a.clientId, site)
+  // the token host the sign-in named, else the site's
+  const host = authHostOf(a.authHost, site) || site.hosts.auth
+  if (!site.deviceExchange) return exchange(a.refresh, a.clientId, site, host)
   const keys = a.devicePrivateKey && a.devicePublicKey ? {} : newDeviceKey()
   try {
-    return await boundExchange({ ...a, ...keys }, site)
+    return await boundExchange({ ...a, ...keys }, site, host)
   } catch {}
-  return { ...(await exchange(a.refresh, a.clientId, site)), ...keys }
+  return { ...(await exchange(a.refresh, a.clientId, site, host)), ...keys }
 }
 
 // ---- the browser sign-in --------------------------------------------------------
@@ -527,10 +593,15 @@ async function signedIn(q, device, site) {
     name: String(info.ScreenName ?? info.screenName ?? ""),
     api: host,
     region: site.regionOf(info),
+    host,
+    // a token host the callback named, if it named one
+    authHost: authHostOf(q.get("authHost") || q.get("auth_host") || info.AuthHost || info.authHost, site),
+    account: accountOf(info),
   }
+  const authHost = s.authHost || site.hosts.auth
   if (!s.token && s.refresh) {
-    const x = await exchange(s.refresh, s.clientId, site)
-    s = { ...s, ...x, uid: x.uid || s.uid, name: x.name || s.name, api: x.api || s.api, region: x.region || s.region }
+    const x = await exchange(s.refresh, s.clientId, site, authHost)
+    s = { ...s, ...x, uid: x.uid || s.uid, name: x.name || s.name, api: x.api || s.api, region: x.region || s.region, host: s.host || x.api, account: { ...x.account, ...s.account } }
   }
   if (!s.token) throw new Error(`${site.webHost} sent back no token`)
   if (!s.refresh) throw new Error(`${site.webHost} sent back no refresh token`)
@@ -539,7 +610,7 @@ async function signedIn(q, device, site) {
   // one at once, so a check-in takes it; when Trae won't, it does as is
   if (site.deviceExchange) {
     try {
-      const x = await boundExchange(s, site)
+      const x = await boundExchange(s, site, authHost)
       s = { ...s, token: x.token, refresh: x.refresh, expires: x.expires || s.expires }
     } catch {}
   }
@@ -616,7 +687,9 @@ async function browserSignIn(site) {
     x_env: "",
     x_app_version: site.ideVersion,
     x_app_type: "stable",
-    hide_saas_login: "true",
+    // the enterprise (SaaS) sign-in is offered beside the personal one: an
+    // enterprise subscription signs in there (@shad70w0 on X)
+    hide_saas_login: "false",
   })
   return {
     url: `${site.hosts.web}/authorization?${q}`,
@@ -2347,4 +2420,4 @@ const makePlugin = (site) => async ({ client }) => {
 export const TraeCNAuthPlugin = makePlugin(SITES["trae-cn"])
 export const TraeGlobalAuthPlugin = makePlugin(SITES["trae-global"])
 
-export const _internal = { HOSTS: SITES["trae-cn"].hosts, MODELS: SITES["trae-cn"].models, TextTools, NativeCalls, looseJSON, glmCall, toolNamed, unwrapped, traeMessages, chatBody, credits, dollarUsageOf, whenOf, newDevice, proofOf, SITES, SESSION, conversationID }
+export const _internal = { traeHost, accountOf, HOSTS: SITES["trae-cn"].hosts, MODELS: SITES["trae-cn"].models, TextTools, NativeCalls, looseJSON, glmCall, toolNamed, unwrapped, traeMessages, chatBody, credits, dollarUsageOf, whenOf, newDevice, proofOf, SITES, SESSION, conversationID }
