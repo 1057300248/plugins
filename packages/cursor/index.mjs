@@ -1408,7 +1408,8 @@ function owe(conv, { since = Date.now(), n = 0, ready = Date.now(), carry = null
 
 // usageEvents are the dashboard's events of conversation conv from since
 // on, the `want` oldest not counted yet, summed: usage (null when none),
-// how many were found (got), and refused when the account can't read them.
+// each with its time (events), how many were found (got), and refused
+// when the account can't read them.
 // Polling, they are looked for as STEP_WAIT says, from `first` on, until
 // all show; else asked for once.
 async function usageEvents(tok, conv, since, want, { poll = false, first = STEP_WAIT.first, signal } = {}) {
@@ -1421,6 +1422,7 @@ async function usageEvents(tok, conv, since, want, { poll = false, first = STEP_
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
   let usage = null
   let got = 0
+  const events = []
   if (poll) await wait(first)
   while (!signal?.aborted) {
     try {
@@ -1433,7 +1435,7 @@ async function usageEvents(tok, conv, since, want, { poll = false, first = STEP_
       if (res.status >= 400 && res.status < 500 && res.status !== 429) {
         // not this account's to read
         unreadable.set(tokKey(tok), Date.now())
-        return { usage, got, refused: true }
+        return { usage, events, got, refused: true }
       }
       const evs = res.ok ? ((await res.json())?.usageEventsDisplay ?? []) : []
       const found = evs
@@ -1443,7 +1445,9 @@ async function usageEvents(tok, conv, since, want, { poll = false, first = STEP_
       for (const ev of found) {
         claimed.set(conv + "\0" + ev.timestamp, Date.now())
         const t = ev.tokenUsage
-        usage = addUsage(usage ?? ZERO(), { input: num(t.inputTokens), output: num(t.outputTokens), cacheRead: num(t.cacheReadTokens), cacheWrite: num(t.cacheWriteTokens) })
+        const u = { input: num(t.inputTokens), output: num(t.outputTokens), cacheRead: num(t.cacheReadTokens), cacheWrite: num(t.cacheWriteTokens), reasoning: 0 }
+        usage = addUsage(usage ?? ZERO(), u)
+        events.push({ at: num(ev.timestamp), usage: u })
         got++
       }
       if (got >= want) break
@@ -1451,7 +1455,7 @@ async function usageEvents(tok, conv, since, want, { poll = false, first = STEP_
     if (!poll || Date.now() + STEP_WAIT.every > end) break
     await wait(STEP_WAIT.every)
   }
-  return { usage, got, refused: false }
+  return { usage, events, got, refused: false }
 }
 
 // stepUsage is the usage of the Run of conversation conv started at since,
@@ -1461,22 +1465,24 @@ async function stepUsage(tok, conv, since, signal) {
 }
 
 // collect takes conversation conv's debt and asks for its events (polling
-// when poll): what was carried and what was found (usage), and whether
-// any is still owed (short), which is owed on. What comes back once the
-// Run that asked is over (over() true) is carried to the next instead.
+// when poll): what was carried and what was found (usage), what was
+// carried alone (carry) and the events found (events), and whether any is
+// still owed (short), which is owed on. What comes back once the Run that
+// asked is over (over() true) is carried to the next instead.
 function collect(tok, conv, { poll = false, first, signal, over = () => false } = {}) {
   const d = owed.get(conv)
-  if (!d) return Promise.resolve({ usage: null, short: false })
+  if (!d) return Promise.resolve({ usage: null, carry: null, events: [], short: false })
   owed.delete(conv)
   const p = (async () => {
-    let r = { usage: null, got: 0 }
+    let r = { usage: null, events: [], got: 0 }
     if (d.n > 0 && canRead(tok)) r = await usageEvents(tok, conv, d.since, d.n, { poll, first, signal }).catch(() => r)
     const short = d.n > r.got && canRead(tok)
     if (short) owe(conv, { since: d.since, n: d.n - r.got, ready: d.ready })
+    const carry = d.carry && { ...d.carry }
     const usage = addUsage(d.carry, r.usage)
-    if (!over()) return { usage, short }
+    if (!over()) return { usage, carry, events: r.events ?? [], short }
     owe(conv, { carry: usage })
-    return { usage: null, short }
+    return { usage: null, carry: null, events: [], short }
   })()
   const set = flights.get(conv) ?? new Set()
   flights.set(conv, set.add(p))
@@ -1498,22 +1504,41 @@ function collect(tok, conv, { poll = false, first, signal, over = () => false } 
 // read its events). owed(final) is what the Run collected otherwise,
 // all that can be had when final. done() ends the Run: what was collected
 // and not given out goes back.
+//
+// What a Run collects is told apart by its event's time: Cursor stamps a
+// Run's event as the Run begins (1.4–3.4 s after since), so one from since
+// on (less the second usageEvents allows) is this Run's own (mine), and one
+// before it, or a count carried, an earlier Run's (theirs). own() gives out only mine, as the step's usage,
+// which a client reads as how full its context is; theirs goes out by
+// owed(), apart. A Run of its conversation begins only once the one
+// before has ended, so the two never meet; were the time off, the step's
+// count would be told in the wrong field, never twice nor lost.
 function ledger(tok, conv, since, signal, kept) {
   const key = tokKey(tok)
-  let pending = null // collected, not given out yet
+  let mine = null // this Run's own, collected, not given out yet
+  let theirs = null // earlier Runs', collected, not given out yet
   let over = false
   const gather = (opts) =>
     collect(tok, conv, { ...opts, over: () => over }).then((r) => {
-      pending = addUsage(pending, r.usage)
+      theirs = addUsage(theirs, r.carry)
+      for (const e of r.events ?? []) {
+        if (e.at >= since - 1000) mine = addUsage(mine, e.usage)
+        else theirs = addUsage(theirs, e.usage)
+      }
       return r
     })
   let collecting = null
   const debt = kept ? owed.get(conv) : undefined
   const timer = debt ? setTimeout(() => (collecting = gather()), Math.max(0, debt.ready - Date.now())) : null
   timer?.unref?.()
+  const takeMine = () => {
+    const u = mine
+    mine = null
+    return u
+  }
   const take = () => {
-    const u = pending
-    pending = null
+    const u = addUsage(theirs, mine)
+    mine = theirs = null
     return u
   }
   return {
@@ -1534,7 +1559,7 @@ function ledger(tok, conv, since, signal, kept) {
         if (r.short) misses.set(key, m + 1)
         else misses.delete(key)
       } else misses.set(key, m + 1)
-      return take() ?? false
+      return takeMine() ?? false
     },
     async owed(final) {
       if (!kept) return null
@@ -1548,7 +1573,8 @@ function ledger(tok, conv, since, signal, kept) {
     done() {
       over = true
       clearTimeout(timer)
-      if (pending) owe(conv, { carry: take() })
+      const u = take()
+      if (u) owe(conv, { carry: u })
     },
   }
 }
@@ -1918,16 +1944,19 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
   // with it or by a later step (ledger), never guessed
   let counted = false
   // finish is the step's end, with what earlier steps owed (more), which
-  // is no reason not to guess the step's own
+  // is no reason not to guess the step's own. The step's usage is its own
+  // Run's alone: a client reads its prompt_tokens as how full the context
+  // is (pi, OpenCode), and an earlier step's prompt added to it read twice
+  // the context. What earlier steps owed goes apart, as magpie_deferred,
+  // which magpie counts with the step and no client reads.
   const finish = (more) => {
     if (!counted && !usage.output) usage.output = Math.floor((said + 3) / 4)
     // a guess only when Cursor counted nothing: a prompt read whole from
     // the cache leaves no uncached rest, and is no reason to guess; nor is
     // a prompt counted from the events
     if (!counted && !usage.input && !usage.cacheRead && !usage.cacheWrite) usage.input = estimate
-    // the events' output is their steps', counted here as their prompt is
-    if (more) for (const k of ["input", "output", "cacheRead", "cacheWrite"]) usage[k] += more[k]
     const prompt = usage.input + usage.cacheRead + usage.cacheWrite
+    const deferred = more && more.input + more.output + more.cacheRead + more.cacheWrite > 0
     return {
       stop: calls > 0 ? "tool_calls" : "stop",
       usage: {
@@ -1936,6 +1965,16 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
         total_tokens: prompt + usage.output,
         prompt_tokens_details: { cached_tokens: usage.cacheRead, cache_write_tokens: usage.cacheWrite },
         ...(usage.reasoning ? { completion_tokens_details: { reasoning_tokens: usage.reasoning } } : {}),
+        ...(deferred
+          ? {
+              magpie_deferred: {
+                prompt_tokens: more.input + more.cacheRead + more.cacheWrite,
+                completion_tokens: more.output,
+                cached_tokens: more.cacheRead,
+                cache_write_tokens: more.cacheWrite,
+              },
+            }
+          : {}),
       },
     }
   }

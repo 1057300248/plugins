@@ -76,9 +76,13 @@ plugin's `fetch` answers them on Cursor's agent API:
   usage events, by the Run's conversation id: it shows in about 2.5 s,
   and is looked for up to 6 s. Far from Cursor it shows later than that
   (yetone/magpie#1053), so the step says 0 used and the conversation owes
-  it: its next steps collect the event in the background and count it
-  with their own, and a step that ends the turn waits for what is still
-  owed, so the conversation adds up to what Cursor counted. An account
+  it: its next steps collect the event in the background, and a step
+  that ends the turn waits for what is still owed, so the conversation
+  adds up to what Cursor counted. What a step collected of earlier steps
+  is not added to its own count, which a client reads as how full its
+  context is: it is `usage.magpie_deferred` (`prompt_tokens`,
+  `completion_tokens`, `cached_tokens`, `cache_write_tokens`), which
+  magpie bills with the step and clients ignore. An account
   whose events miss the wait 3 steps in a row stops waiting for them.
   With nothing naming the session (so no later step to collect it), or
   an account that can't read its usage events, the step is estimated as

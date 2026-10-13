@@ -143,12 +143,14 @@ const chat = (steps) => {
   return { model: "claude-fable-5-thinking", messages, tools: [{ type: "function", function: { name: "Read", parameters: { type: "object" } } }] }
 }
 
+// what magpie bills for the steps: each step's own, and what it collected
+// of earlier steps' (magpie_deferred), which its prompt_tokens leaves out
 const sum = (us) =>
   us.reduce(
     (a, u) => ({
-      prompt: a.prompt + u.prompt_tokens,
-      cached: a.cached + u.prompt_tokens_details.cached_tokens,
-      written: a.written + u.prompt_tokens_details.cache_write_tokens,
+      prompt: a.prompt + u.prompt_tokens + (u.magpie_deferred?.prompt_tokens ?? 0),
+      cached: a.cached + u.prompt_tokens_details.cached_tokens + (u.magpie_deferred?.cached_tokens ?? 0),
+      written: a.written + u.prompt_tokens_details.cache_write_tokens + (u.magpie_deferred?.cache_write_tokens ?? 0),
     }),
     { prompt: 0, cached: 0, written: 0 },
   )
