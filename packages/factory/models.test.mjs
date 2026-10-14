@@ -71,8 +71,12 @@ test("every model in droid 0.240.0's picker is offered, or left out for a reason
     "gpt-5.2-codex": "older", "gpt-5.1-codex-max": "older", "grok-4.5": "older", "kimi-k2.5": "older",
     "glm-5.1": "older", "glm-5": "older", "glm-4.7": "older",
     "deepseek-v4-flash-0731": "older", "deepseek-v4-pro": "older",
+    // Fast Mode models whose base model isn't offered, unreleased, or
+    // behind a feature flag (fast.test.mjs)
+    "claude-opus-4-7-fast": "older", "claude-opus-4-6-fast": "older", "gpt-5.4-mini-fast": "older",
+    "gpt-5.6-sol-fast": "unreleased", "glm-5.2-fast": "flag",
   }
-  const missing = picker.filter((id) => !got[id] && !reason[id] && !/-fast$/.test(id))
+  const missing = picker.filter((id) => !got[id] && !reason[id])
   expect(missing).toEqual([])
   expect(entry("gpt-6-astra-ultrafast")).toContain('explicitOptInRequirement:{kind:"high_cost"')
   expect(got["gpt-6-astra-ultrafast"]).toBeUndefined()

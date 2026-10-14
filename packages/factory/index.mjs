@@ -45,13 +45,20 @@ const E4 = ["low", "medium", "high", "xhigh"]
 // (explicitOptInRequirement). Gemini's are droid 0.241.1's, as magpie's
 // built-in has them (yetone/magpie#2080); Gemini 4 Argon is behind a
 // feature flag of Factory's there, so an account it isn't on for may be
-// refused it.
+// refused it. The Fast Mode models are droid 0.240.0's (fastBody; testdata/
+// droid-0.240.0-fast.txt), at their base model's limits and efforts as
+// droid has them. Left out: Opus 4.6/4.7 Fast and GPT-5.4 Mini Fast (their
+// base models aren't offered), GPT-5.6 Sol Fast (unreleased:!0) and
+// GLM-5.2 Fast (behind a feature flag, on a Baseten model id of its own).
 const MODELS = [
   ["claude-fable-5.1", "Fable 5.1", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-fable-5", "Fable 5", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-opus-5-5", "Opus 5.5", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
+  ["claude-opus-5-5-fast", "Opus 5.5 Fast Mode", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
   ["claude-opus-5", "Opus 5", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
+  ["claude-opus-5-fast", "Opus 5 Fast Mode", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-opus-4-8", "Opus 4.8", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
+  ["claude-opus-4-8-fast", "Opus 4.8 Fast Mode", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-sonnet-5-5", "Sonnet 5.5", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
   ["claude-sonnet-5", "Sonnet 5", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
   ["claude-sonnet-4-6", "Sonnet 4.6", ANTHROPIC, "anthropic", 931000, 64000, ["low", "medium", "high", "max"], true],
@@ -65,8 +72,11 @@ const MODELS = [
   ["gpt-5.6-terra", "GPT-5.6 Terra", RESPONSES, "openai", 1050000, 128000, E6, true],
   ["gpt-5.6-luna", "GPT-5.6 Luna", RESPONSES, "openai", 1050000, 128000, E6, true],
   ["gpt-5.5", "GPT-5.5", RESPONSES, "openai", 1050000, 128000, E4, true],
+  ["gpt-5.5-fast", "GPT-5.5 Fast Mode", RESPONSES, "openai", 1050000, 128000, E4, true],
   ["gpt-5.4", "GPT-5.4", RESPONSES, "openai", 1050000, 128000, E4, true],
+  ["gpt-5.4-fast", "GPT-5.4 Fast Mode", RESPONSES, "openai", 1050000, 128000, E4, true],
   ["gpt-5.3-codex", "GPT-5.3-Codex", RESPONSES, "openai", 400000, 128000, E4, true],
+  ["gpt-5.3-codex-fast", "GPT-5.3-Codex Fast Mode", RESPONSES, "openai", 400000, 128000, E4, true],
   ["grok-4.7", "Grok 4.7", RESPONSES, "xai", 500000, 63356, E4, true],
   ["grok-4.6", "Grok 4.6", RESPONSES, "xai", 200000, 63356, E4, true],
   // reasoning is mandatory on GLM-5.3 and GLM-5.3-Flash (Fireworks turns
@@ -93,6 +103,46 @@ const MODELS = [
 ].map(([id, name, wire, upstream, context, output, efforts, images]) => ({ id, name, wire, upstream, context, output, efforts, images }))
 
 const byId = new Map(MODELS.map((m) => [m.id, m]))
+
+// A Fast Mode model is its base model served faster for more credits.
+// droid sends the Fast Mode id itself as the model; on Anthropic's wire with
+// speed "fast" and the fast-mode beta (anthropicFastMode), on OpenAI's with
+// service_tier "priority" (its apiRequest). FAST_OF is a base model's Fast
+// Mode id.
+const FAST_BETA = "fast-mode-2026-02-01"
+const FAST_OF = new Map(MODELS.filter((m) => m.id.endsWith("-fast")).map((m) => [m.id.slice(0, -"-fast".length), m.id]))
+
+// fastBody sends a Fast Mode model as droid does. A request that asks its
+// base model for fast (Claude Code's speed "fast", or service_tier
+// "priority" on Responses) goes to the base model's Fast Mode model, as
+// droid's own fast toggle switches to it: asked of the base model, Factory
+// answered at standard speed, fast asked and standard served with nothing
+// said (#119). Beta is
+// whether the request needs the fast-mode beta.
+function fastBody(path, body) {
+  const anthropic = path.includes("/llm/a/") && path.endsWith("/messages")
+  const responses = path.includes("/llm/o/") && path.endsWith("/responses")
+  if (!anthropic && !responses) return { body, beta: false }
+  const text = bodyText(body)
+  if (text == null) return { body, beta: false }
+  let m
+  try {
+    m = JSON.parse(text)
+  } catch {
+    return { body, beta: false }
+  }
+  if (!m || typeof m !== "object" || Array.isArray(m) || typeof m.model !== "string") return { body, beta: false }
+  const asked = anthropic ? m.speed === "fast" : m.service_tier === "priority"
+  const model = asked && FAST_OF.has(m.model) ? FAST_OF.get(m.model) : m.model
+  const fast = byId.get(model)
+  if (!fast || !model.endsWith("-fast") || fast.wire !== (anthropic ? ANTHROPIC : RESPONSES)) return { body, beta: false }
+  if (anthropic && model === m.model && m.speed === "fast") return { body, beta: true }
+  if (responses && model === m.model && m.service_tier === "priority") return { body, beta: false }
+  m.model = model
+  if (anthropic) m.speed = "fast"
+  else m.service_tier = "priority"
+  return { body: JSON.stringify(m), beta: anthropic }
+}
 
 // variant is what the AI SDK package a model is on is given for an effort.
 function variant(npm, effort) {
@@ -1595,8 +1645,14 @@ export const FactoryAuthPlugin = async ({ client }) => {
           // the AI SDK's Google package's, with OpenCode's placeholder key
           h.delete("x-goog-api-key")
           factoryHeaders(h, c)
-          const model = byId.get(bodyModel(body))
           const path = new URL(url).pathname
+          const sped = fastBody(path, body)
+          body = sped.body
+          if (sped.beta) {
+            const betas = (h.get("anthropic-beta") ?? "").split(",").map((b) => b.trim()).filter(Boolean)
+            if (!betas.includes(FAST_BETA)) h.set("anthropic-beta", [...betas, FAST_BETA].join(","))
+          }
+          const model = byId.get(bodyModel(body))
           const upstream = model ? model.upstream : path.includes("/llm/o/") ? "openai" : "anthropic"
           h.set("x-api-provider", upstream)
           h.set("x-session-id", session)
@@ -1672,4 +1728,4 @@ export const FactoryAuthPlugin = async ({ client }) => {
 }
 
 // for tests
-export const _internal = { limitWindows, windowEnd, dollars, vendorError, CORE, droidBody, DROID_LINE, geminiBody, leaveOutAttachments, LEFT_OUT, TOO_LARGE_HINT }
+export const _internal = { fastBody, FAST_BETA, limitWindows, windowEnd, dollars, vendorError, CORE, droidBody, DROID_LINE, geminiBody, leaveOutAttachments, LEFT_OUT, TOO_LARGE_HINT }
