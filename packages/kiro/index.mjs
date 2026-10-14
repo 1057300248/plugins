@@ -646,6 +646,12 @@ function thinking(req, model) {
 // buildKiro is the body of a generateAssistantResponse call.
 function buildKiro(req, model, profile, budget) {
   const entries = []
+  // the messages the caller marked for its prompt cache (cache_control),
+  // which go to Kiro as a cachePoint on the message they end up in (#110)
+  const marked = new WeakSet()
+  const mark = (msg, parts) => {
+    if (parts.some((p) => p?.cache_control)) marked.add(msg)
+  }
   const user = () => ({ content: "", modelId: model, origin: "KIRO_CLI" })
   for (const m of req.messages ?? []) {
     const parts = typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content ?? []
@@ -666,6 +672,7 @@ function buildKiro(req, model, profile, budget) {
         prev.content = joinNonEmpty(prev.content, a.content)
         prev.toolUses.push(...a.toolUses)
       } else entries.push({ assistantResponseMessage: a })
+      mark(prev ?? a, parts)
       continue
     }
     const u = user()
@@ -693,6 +700,7 @@ function buildKiro(req, model, profile, budget) {
       prev.images.push(...u.images)
       if (results.length) (prev.userInputMessageContext ??= { toolResults: [] }).toolResults.push(...results)
     } else entries.push({ userInputMessage: u })
+    mark(prev ?? u, parts)
   }
   // the conversation opens with something the user said: tool results with
   // no call before them go, and a reply the caller began with
@@ -748,6 +756,7 @@ function buildKiro(req, model, profile, budget) {
   let system = typeof req.system === "string" ? req.system : textOf(req.system)
   if (budget) system = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>` + (system ? "\n" + system : "")
   if (system) entries[0].userInputMessage.content = system + "\n\n" + entries[0].userInputMessage.content
+  if (Array.isArray(req.system)) mark(entries[0].userInputMessage, req.system)
 
   // the caller's tools, and any the conversation used that it no longer
   // offers — Kiro rejects a history naming a tool it wasn't given
@@ -760,6 +769,7 @@ function buildKiro(req, model, profile, budget) {
     const name = toolName(t.name)
     offered.add(name)
     tools.push({ toolSpecification: { name, description: t.description || t.name, inputSchema: { json: t.input_schema ?? EMPTY } } })
+    if (t.cache_control) tools.push({ cachePoint: { type: "default" } })
   }
   for (const e of entries)
     for (const c of e.assistantResponseMessage?.toolUses ?? [])
@@ -768,6 +778,19 @@ function buildKiro(req, model, profile, budget) {
         tools.push({ toolSpecification: { name: c.name, description: "Tool", inputSchema: { json: EMPTY } } })
       }
   if (tools.length) (current.userInputMessageContext ??= {}).tools = tools
+  // Kiro's cachePoint is Bedrock's: it caches the prompt up to the point,
+  // and a request may hold 4 at most, as Anthropic's cache_control; past
+  // that the last ones are kept, the most of the prompt they cover
+  const points = []
+  for (const t of tools) if (t.cachePoint) points.push(() => tools.splice(tools.indexOf(t), 1))
+  for (const e of entries) {
+    const msg = e.userInputMessage ?? e.assistantResponseMessage
+    if (marked.has(msg)) {
+      msg.cachePoint = { type: "default" }
+      points.push(() => delete msg.cachePoint)
+    }
+  }
+  for (const drop of points.slice(0, Math.max(0, points.length - 4))) drop()
 
   const state = { chatTriggerType: "MANUAL", agentTaskType: "vibe", conversationId: randomUUID(), currentMessage: { userInputMessage: current } }
   if (entries.length > 1) state.history = entries.slice(0, -1)
