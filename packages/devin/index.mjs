@@ -232,29 +232,32 @@ function variantFor(families, model, effort) {
 // Each entry says whether it takes images (image) as images, Devin's word
 // for each variant id, gives it: a variant its own, a family (and its fast
 // run) what all its variants Devin named say; undefined when Devin said
-// nothing of it or its variants disagree.
-function listed(families, keep = [], images = {}) {
+// nothing of it or its variants disagree. An entry is free (free: true) when
+// every variant of Devin's it stands for is in free, the ids Devin says its
+// quota doesn't count (parseFree).
+function listed(families, keep = [], images = {}, free = new Set()) {
+  const all = (ids) => ids.length > 0 && ids.every((id) => free.has(id))
   const out = []
   const seen = new Set()
-  const add = (m) => {
+  const add = ({ free, ...m }) => {
     if (seen.has(m.id)) return
     seen.add(m.id)
-    out.push(m)
+    out.push(free ? { ...m, free } : m)
   }
   for (const f of families) {
     const context = f.models.find((m) => m.context)?.context ?? 0
     const output = f.models.find((m) => m.output)?.output ?? 0
     const image = familyImages(f, images)
-    add({ id: f.uid, name: f.label, context, output, efforts: efforts(f, ""), image })
+    add({ id: f.uid, name: f.label, context, output, efforts: efforts(f, ""), image, free: all(f.models.map((m) => m.id)) })
     for (const t of tiers(f)) {
       const id = f.uid + "-" + t
       if (families.some((g) => named(g, id))) continue
-      add({ id, name: f.label + " " + TIERS.find(([w]) => w === t)[1], context, output, efforts: efforts(f, t), image })
+      add({ id, name: f.label + " " + TIERS.find(([w]) => w === t)[1], context, output, efforts: efforts(f, t), image, free: all(Object.values(byLevel(f, t))) })
     }
     if (f.models.length === 1) continue
     for (const m of f.models) {
       if (m.id === f.uid || tierOf(m.id)[1]) continue
-      add({ id: m.id, name: m.name, context: m.context || context, output: m.output || output, efforts: [], image: images[m.id] })
+      add({ id: m.id, name: m.name, context: m.context || context, output: m.output || output, efforts: [], image: images[m.id], free: free.has(m.id) })
     }
   }
   for (const id of keep) {
@@ -263,7 +266,7 @@ function listed(families, keep = [], images = {}) {
     const m = f?.models.find((m) => m.id === id)
     const level = tierOf(id)[1]
     if (!m && !level) continue
-    add({ id, name: m?.name || id, context: m?.context ?? 0, output: m?.output ?? 0, efforts: level ? [level] : [], image: images[id] })
+    add({ id, name: m?.name || id, context: m?.context ?? 0, output: m?.output ?? 0, efforts: level ? [level] : [], image: images[id], free: free.has(id) })
   }
   return out
 }
@@ -315,6 +318,32 @@ function parseModelConfigs(b) {
     if (uid) out[uid] = images
   }
   return Object.keys(out).length ? out : null
+}
+
+// FREE_TIER is the model_cost_tier (ClientModelConfig's 24) of a model the
+// account's quota doesn't count: the CLI's picker labels its tiers "Low
+// cost", "Med cost", "High cost" and "Free", 1 to 4. On 2026-10-14 Devin
+// gave SWE-2's three variants 4 and no other model of its 262 (太陽と向日葵
+// on magpie's Discord: with the quota used up, SWE-2 still answered, but
+// magpie held the account for it as for every other model).
+const FREE_TIER = 4
+
+// parseFree reads the same response for the ids of the models that are
+// free: each config's model_uid (22) whose model_cost_tier (24) is
+// FREE_TIER. A config that says no tier is not free.
+function parseFree(b) {
+  const out = new Set()
+  for (const f of fields(b)) {
+    if (f.num !== 1 || f.wire !== 2) continue
+    let uid = ""
+    let tier = 0
+    for (const g of fields(f.data)) {
+      if (g.num === 22 && g.wire === 2) uid = dec.decode(g.data)
+      else if (g.num === 24 && g.wire === 0) tier = g.n
+    }
+    if (uid && tier === FREE_TIER) out.add(uid)
+  }
+  return out
 }
 
 // parseConfigFamilies reads the same response as the families `devin
@@ -370,7 +399,7 @@ const said = new Map()
 // first ask isn't waited for.
 async function configsFor(key, server, wait = true) {
   let c = said.get(key)
-  if (!c) said.set(key, (c = { images: null, families: null, at: 0, failed: 0, asking: null }))
+  if (!c) said.set(key, (c = { images: null, families: null, free: new Set(), at: 0, failed: 0, asking: null }))
   const ask = () =>
     (c.asking ??= (async () => {
       try {
@@ -385,7 +414,7 @@ async function configsFor(key, server, wait = true) {
         const images = parseModelConfigs(b)
         if (!images) throw new Error("GetCliModelConfigs: no models")
         const families = parseConfigFamilies(b)
-        Object.assign(c, { images, families: families.length ? families : null, at: Date.now(), failed: 0 })
+        Object.assign(c, { images, families: families.length ? families : null, free: parseFree(b), at: Date.now(), failed: 0 })
       } catch {
         c.failed = Date.now()
       } finally {
@@ -479,6 +508,8 @@ function runtimeModel(m) {
     },
     release_date: "",
     variants: Object.fromEntries(m.efforts.map((e) => [e, { reasoningEffort: e }])),
+    // magpie's: a model the account's quota doesn't count
+    ...(m.free ? { free: true } : {}),
   }
 }
 
@@ -1535,7 +1566,9 @@ function userStatus(key, server) {
 // used this cycle, and the extra usage balance. JSON leaves out what is
 // zero, so a quota-billed plan's quota with a reset and no share is used
 // up. magpie's
-// built-in Devin account showed none of this.
+// built-in Devin account showed none of this. The day and the week don't
+// count the models Devin says are free (notModels): with them used up,
+// SWE-2 still answers, and magpie sends it to the account.
 async function usage(key, server) {
   const res = await userStatus(key, server)
   const text = await res.text()
@@ -1563,6 +1596,10 @@ async function usage(key, server) {
     if (hide || ((left === undefined || left === null) && !(quota && at > 0))) continue
     out.windows.push({ name, used: Math.min(100, Math.max(0, 100 - num(left))), span, ...(at > 0 ? { resetsAt: at } : {}) })
   }
+  if (out.windows.length) {
+    const free = await freeIDs(key, server)
+    if (free.length) for (const w of out.windows) w.notModels = free
+  }
   const limit = num(st.acuLimit)
   if (limit > 0) {
     const used = num(st.acuConsumed)
@@ -1571,6 +1608,18 @@ async function usage(key, server) {
   const extra = num(st.overageBalanceMicros)
   if (extra > 0) out.balance = "$" + (extra / 1e6).toFixed(2)
   return out
+}
+
+// freeIDs are the ids of key's account's free models (parseFree) as magpie
+// may ask for them: each variant's own, and each entry of the list that
+// stands for free variants alone (swe-2 for swe-2-high, -medium and -max).
+// None when Devin hasn't said.
+async function freeIDs(key, server) {
+  const c = await configsFor(key, server)
+  if (!c.free?.size) return []
+  const ids = new Set(c.free)
+  for (const m of listed(c.families ?? [], [], {}, c.free)) if (m.free) ids.add(m.id)
+  return [...ids]
 }
 
 // serverOf is the API server an account's requests go to:
@@ -1654,13 +1703,14 @@ export async function DevinAuthPlugin() {
         if (auth?.type !== "api" || !auth.key) return provider.models
         const { key, server } = await live(auth)
         const images = await imagesFor(key, server)
+        const { free } = await configsFor(key, server)
         const families = await ownFamilies(key, server)
         if (!families) return withImages(provider.models, listed(familiesOf(SNAPSHOT), Object.keys(provider?.models ?? {}), images))
-        return Object.fromEntries(listed(families, Object.keys(provider?.models ?? {}), images).map((m) => [m.id, runtimeModel(m)]))
+        return Object.fromEntries(listed(families, Object.keys(provider?.models ?? {}), images, free).map((m) => [m.id, runtimeModel(m)]))
       },
     },
   }
 }
 
 // for tests
-export const _internal = { outID, inID, objectRoot, seesImages, imagesFor, forgetSaid: () => said.clear(), parseModelConfigs, parseConfigFamilies, SNAPSHOT_IMAGES, withImages, forgetImages: () => (seen = null), effortOf, runtimeModel, configModel, live, build, failure, complete, parseFamilies, listed, variantFor, familiesOf, SNAPSHOT, parseStatus, readsHome, tierName, whoByKey, success, familiesFor, readCredentials, credentials, fields, frame, PB, events, frames }
+export const _internal = { parseFree, freeIDs, outID, inID, objectRoot, seesImages, imagesFor, forgetSaid: () => said.clear(), parseModelConfigs, parseConfigFamilies, SNAPSHOT_IMAGES, withImages, forgetImages: () => (seen = null), effortOf, runtimeModel, configModel, live, build, failure, complete, parseFamilies, listed, variantFor, familiesOf, SNAPSHOT, parseStatus, readsHome, tierName, whoByKey, success, familiesFor, readCredentials, credentials, fields, frame, PB, events, frames }
