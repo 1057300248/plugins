@@ -78,6 +78,12 @@ itself.
   reasoning and usage.
 - Tool calls Qoder writes as XML or JSON in its text become tool calls.
   Tool calls it sends the OpenAI way keep Qoder's id.
+- A call written in the text that can't be read, or that the stream ends
+  inside, is never sent on as the answer (since 0.2.16, #132): the turn
+  ends as an error, a 502 or the stream's error frame with no finish, so
+  the agent or magpie can try again. A call whose JSON is whole when the
+  stream ends without its close is still the call; a tag in code or prose
+  stays text.
 
 **Errors**
 

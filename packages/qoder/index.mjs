@@ -884,13 +884,37 @@ function parseCall(v) {
   return { name: m[1].trim(), args: JSON.stringify(args) }
 }
 
+// quoted says text ends inside a code fence or an inline code span: a
+// <tool_call> there is prose about one, not a call
+function quoted(text) {
+  if ((text.match(/```/g)?.length ?? 0) % 2) return true
+  const line = text.slice(text.lastIndexOf("\n") + 1).replace(/```/g, "")
+  return (line.match(/`/g)?.length ?? 0) % 2 === 1
+}
+
+// callish says a block was on its way to being a call: its JSON began, or
+// the XML function form
+const callish = (v) => v.trimStart().startsWith("{") || v.includes("\x3cfunction=")
+
+const CUT_SHORT = "the model's tool call, written as text, was cut short; it is not sent on as the answer"
+const UNREADABLE = "the model's tool call, written as text, can't be read; it is not sent on as the answer"
+
 // Splitter holds text until a whole tool-call block has come, then gives
-// it as a call.
+// it as a call. A block on its way to being a call that can't be read, or
+// that the stream ended inside, is an error, never the answer (plugins#132,
+// as trae's since plugins#38): the turn fails so it can be tried again. A
+// block whose JSON is whole when the stream ends without its close is still
+// the call; one that is no call at all, or one in code, stays text.
 class Splitter {
   textBuf = ""
   callBuf = ""
   inCall = false
   sawTool = false
+  sent = "" // the text given out so far, to tell a block in code from a call
+  text(out, t) {
+    this.sent += t
+    out.push({ text: t })
+  }
   feed(input) {
     const out = []
     while (input) {
@@ -905,11 +929,11 @@ class Splitter {
               keep = n
               break
             }
-          if (keep < comb.length) out.push({ text: comb.slice(0, comb.length - keep) })
+          if (keep < comb.length) this.text(out, comb.slice(0, comb.length - keep))
           this.textBuf = comb.slice(comb.length - keep)
           break
         }
-        if (i > 0) out.push({ text: comb.slice(0, i) })
+        if (i > 0) this.text(out, comb.slice(0, i))
         input = comb.slice(i + CALL_OPEN.length)
         this.inCall = true
         continue
@@ -921,11 +945,16 @@ class Splitter {
         this.callBuf = comb
         break
       }
-      const c = parseCall(comb.slice(0, j))
+      const body = comb.slice(0, j)
+      const c = parseCall(body)
       if (c) {
         this.sawTool = true
         out.push({ call: c })
-      } else out.push({ text: CALL_OPEN + comb.slice(0, j) + CALL_CLOSE })
+      } else if (callish(body) && !quoted(this.sent)) {
+        this.inCall = false
+        out.push({ error: UNREADABLE })
+        return out
+      } else this.text(out, CALL_OPEN + body + CALL_CLOSE)
       input = comb.slice(j + CALL_CLOSE.length)
       this.inCall = false
     }
@@ -933,14 +962,23 @@ class Splitter {
   }
   flush() {
     if (this.inCall) {
-      const t = CALL_OPEN + this.callBuf
+      const body = this.callBuf
       this.inCall = false
       this.callBuf = ""
+      if (callish(body) && !quoted(this.sent)) {
+        const c = parseCall(body)
+        if (!c) return [{ error: CUT_SHORT }]
+        this.sawTool = true
+        return [{ call: c }]
+      }
+      const t = CALL_OPEN + body
+      this.sent += t
       return [{ text: t }]
     }
     if (this.textBuf) {
       const t = this.textBuf
       this.textBuf = ""
+      this.sent += t
       return [{ text: t }]
     }
     return []
@@ -968,9 +1006,10 @@ async function* events(body) {
   const a = new Splitter()
   let index = -1 // the tool call being given
   let native = -1 // the native tool call being assembled
-  const flushed = function* () {
-    for (const f of a.flush()) if (f.text) yield { text: f.text }
-  }
+  // one piece of the split text as an event: a call, text, or a call that
+  // can't be read, which ends the turn as a 502
+  const piece = (f) =>
+    f.call ? { tool: { index: ++index, id: "call_" + hexID(), name: f.call.name, args: f.call.args } } : f.error ? { error: { status: 502, message: f.error } } : { text: f.text }
   let usage
   let fr = ""
   for await (const line of sseLines(body)) {
@@ -998,15 +1037,21 @@ async function* events(body) {
     if (delta.reasoning_content) yield { reasoning: delta.reasoning_content }
     if (typeof delta.content === "string")
       for (const f of a.feed(delta.content)) {
-        if (f.call) yield { tool: { index: ++index, id: "call_" + hexID(), name: f.call.name, args: f.call.args } }
-        else if (f.text) yield { text: f.text }
+        if (!f.call && !f.error && !f.text) continue
+        const e = piece(f)
+        yield e
+        if (e.error) return
       }
     // tool calls served the OpenAI way keep Qoder's id: a result answers it
     for (const tc of delta.tool_calls ?? []) {
       const i = Number(tc.index ?? 0)
       if (i !== native) {
         native = i
-        yield* flushed()
+        for (const f of a.flush()) {
+          const e = piece(f)
+          yield e
+          if (e.error) return
+        }
         a.sawTool = true
         yield { tool: { index: ++index, id: tc.id || "call_" + hexID(), name: tc.function?.name ?? "", args: tc.function?.arguments ?? "" } }
       } else if (tc.function?.arguments) yield { args: { index, text: tc.function.arguments } }
@@ -1025,7 +1070,11 @@ async function* events(body) {
         ...(u.completion_tokens_details?.reasoning_tokens ? { completion_tokens_details: { reasoning_tokens: u.completion_tokens_details.reasoning_tokens } } : {}),
       }
   }
-  yield* flushed()
+  for (const f of a.flush()) {
+    const e = piece(f)
+    yield e
+    if (e.error) return
+  }
   yield { stop: a.sawTool ? "tool_calls" : fr === "length" ? "length" : "stop", usage }
 }
 
