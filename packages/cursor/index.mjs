@@ -2349,8 +2349,12 @@ export async function CursorAuthPlugin() {
           return { error: e.message, windows: [], signIn: "kept" }
         }
         const [u, plan, bot] = await Promise.all([usage(tok, Object.keys(provider?.models ?? {})), planOf(tok), botUsage(tok)])
-        // Put Bot before Total for magpie's three menu-bar rings.
-        const windows = [...u.windows.filter((w) => w.name !== "Total"), ...bot, ...u.windows.filter((w) => w.name === "Total")]
+        // Bot goes among magpie's three menu-bar rings: before Total, and
+        // before an On-demand with no limit, which is only a dollar figure on
+        // a ring that never fills (magpie #2213, Morganwan90). An On-demand
+        // with a limit stays ahead of it: that is what can stop the account.
+        const last = (w) => w.name === "Total" || (w.name === "On-demand" && w.aside)
+        const windows = [...u.windows.filter((w) => !last(w)), ...bot, ...u.windows.filter(last)]
         return { ...u, windows, ...(plan ? { plan } : {}), signIn: "kept" }
       },
     },
