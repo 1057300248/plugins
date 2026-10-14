@@ -27,18 +27,25 @@ const ASK_AGAIN = 10 * 60 * 1000
 const ANTHROPIC = { npm: "@ai-sdk/anthropic", api: API + "/api/llm/a/v1" }
 const RESPONSES = { npm: "@ai-sdk/openai", api: API + "/api/llm/o/v1" }
 const CHAT = { npm: "@ai-sdk/openai-compatible", api: API + "/api/llm/o/v1" }
+// Gemini's go to Factory's /api/llm/g/v1/generate, the model in the body
+// (geminiBody); the AI SDK's Google package asks for :streamGenerateContent
+// under models/, which send() takes there
+const GEMINI = { npm: "@ai-sdk/google", api: API + "/api/llm/g/v1" }
 
 const E5 = ["low", "medium", "high", "xhigh", "max"]
 const E6 = ["none", "low", "medium", "high", "xhigh", "max"]
 const E4 = ["low", "medium", "high", "xhigh"]
 
-// The models droid's /model picker offers, less Gemini's (sent on a route of
-// Factory's own) and auto (droid picks it client side): id, name, the wire
-// droid sends it on, the vendor it names in x-api-provider, context, output,
-// reasoning efforts, images. Haiku 5.5 and Mistral Large 4 are droid
-// 0.240.0's (models.test.mjs reads its registry); GPT-6 Astra Ultra Fast,
-// new there too, stays out: droid offers it only after the user accepts
-// Factory's high-cost terms for it (explicitOptInRequirement).
+// The models droid's /model picker offers, less auto (droid picks it client
+// side): id, name, the wire droid sends it on, the vendor it names in
+// x-api-provider, context, output, reasoning efforts, images. Haiku 5.5 and
+// Mistral Large 4 are droid 0.240.0's (models.test.mjs reads its registry);
+// GPT-6 Astra Ultra Fast, new there too, stays out: droid offers it only
+// after the user accepts Factory's high-cost terms for it
+// (explicitOptInRequirement). Gemini's are droid 0.241.1's, as magpie's
+// built-in has them (yetone/magpie#2080); Gemini 4 Argon is behind a
+// feature flag of Factory's there, so an account it isn't on for may be
+// refused it.
 const MODELS = [
   ["claude-fable-5.1", "Fable 5.1", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-fable-5", "Fable 5", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
@@ -76,6 +83,13 @@ const MODELS = [
   ["mistral-large-4", "Mistral Large 4", CHAT, "mistral", 524288, 64000, ["high"], true],
   ["mistral-medium-3.5", "Mistral Medium 3.5", CHAT, "mistral", 256000, 64000, ["high"], true],
   ["nemotron-3-ultra", "Nemotron 3 Ultra", CHAT, "baseten", 202000, 65536, ["high"], false],
+  ["gemini-4-argon", "Gemini 4 Argon", GEMINI, "google", 1000000, 65536, ["low", "medium", "high"], true],
+  ["gemini-3.1-pro-preview", "Gemini 3.1 Pro", GEMINI, "google", 1000000, 65536, ["low", "medium", "high"], true],
+  ["gemini-3.8-flash", "Gemini 3.8 Flash", GEMINI, "google", 1000000, 65536, ["low", "medium", "high"], true],
+  ["gemini-3.7-flash", "Gemini 3.7 Flash", GEMINI, "google", 1000000, 65536, ["low", "medium", "high"], true],
+  ["gemini-3.6-flash", "Gemini 3.6 Flash", GEMINI, "google", 1000000, 65536, ["low", "medium", "high"], true],
+  ["gemini-3.5-flash", "Gemini 3.5 Flash", GEMINI, "google", 1000000, 65536, ["minimal", "low", "medium", "high"], true],
+  ["gemini-3-flash-preview", "Gemini 3 Flash", GEMINI, "google", 1000000, 65536, ["minimal", "low", "medium", "high"], true],
 ].map(([id, name, wire, upstream, context, output, efforts, images]) => ({ id, name, wire, upstream, context, output, efforts, images }))
 
 const byId = new Map(MODELS.map((m) => [m.id, m]))
@@ -83,6 +97,7 @@ const byId = new Map(MODELS.map((m) => [m.id, m]))
 // variant is what the AI SDK package a model is on is given for an effort.
 function variant(npm, effort) {
   if (npm === ANTHROPIC.npm) return { effort }
+  if (npm === GEMINI.npm) return { thinkingConfig: { includeThoughts: true, thinkingLevel: effort } }
   return { reasoningEffort: effort }
 }
 
@@ -400,6 +415,53 @@ function droidBody(path, body) {
   return JSON.stringify(m)
 }
 
+// bodyText is a request body as text, or null for one that isn't.
+function bodyText(body) {
+  if (typeof body === "string") return body
+  if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return Buffer.from(body instanceof ArrayBuffer ? body : body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength)).toString("utf8")
+  return null
+}
+
+// GEMINI_CALL is the AI SDK Google package's request path, the model in it.
+const GEMINI_CALL = /\/models\/([^/:]+):(?:stream)?generateContent$/i
+
+// geminiBody is body, a Gemini generateContent request for model, as
+// Factory's /api/llm/g/v1/generate takes it, as magpie's built-in sends it
+// (buildGemini, factoryDroidGoogle): the model in the body, the system
+// instruction without a role and opening with droid's line, as one text part
+// of droid's line and the instruction's text parts joined with "\n", then
+// its other parts. A body that can't be read goes on as it is.
+function geminiBody(model, body) {
+  const text = bodyText(body)
+  if (text == null) return body
+  let m
+  try {
+    m = JSON.parse(text)
+  } catch {
+    return body
+  }
+  if (!m || typeof m !== "object" || Array.isArray(m)) return body
+  m.model = model
+  delete m.stream
+  let si = m.systemInstruction
+  if (typeof si === "string") si = { parts: [{ text: si }] }
+  if (!si || typeof si !== "object") si = { parts: [] }
+  delete si.role
+  const parts = Array.isArray(si.parts) ? si.parts : []
+  if (!(typeof parts[0]?.text === "string" && parts[0].text.startsWith(DROID_LINE))) {
+    const texts = []
+    const rest = []
+    for (const p of parts) {
+      if (p && typeof p === "object" && typeof p.text === "string" && Object.keys(p).length === 1) texts.push(p.text)
+      else rest.push(p)
+    }
+    const joined = texts.join("\n")
+    si.parts = [{ text: joined.trim() === "" ? DROID_LINE : DROID_LINE + "\n" + joined }, ...rest]
+  }
+  m.systemInstruction = si
+  return JSON.stringify(m)
+}
+
 // errorReply is an error as the API the request was for words one:
 // Anthropic's on /llm/a/, OpenAI's on the others.
 function errorReply(url, status, type, message, headers = new Headers()) {
@@ -550,8 +612,8 @@ async function deviceSignIn() {
 // is a balance in cents.
 
 // CORE are the models Droid Core's windows count: those of a vendor other
-// than Anthropic, OpenAI and xAI. Standard's count every other model.
-const CORE = MODELS.filter((m) => !["anthropic", "openai", "xai"].includes(m.upstream)).map((m) => m.id)
+// than Anthropic, OpenAI, xAI and Google. Standard's count every other model.
+const CORE = MODELS.filter((m) => !["anthropic", "openai", "xai", "google"].includes(m.upstream)).map((m) => m.id)
 
 // statusLine is a status as Go's HTTP client names it, "403 Forbidden".
 const statusLine = (status) => `${status} ${STATUS_CODES[status] ?? ""}`.trim()
@@ -1432,12 +1494,23 @@ export const FactoryAuthPlugin = async ({ client }) => {
         const send = async (input, init, body, renewed) => {
           const c = await fresh(renewed)
           let url = input instanceof Request ? input.url : String(input)
+          // Gemini's: Factory's generate route, the model in the body
+          const call = GEMINI_CALL.exec(new URL(url).pathname)
+          if (call) {
+            const u = new URL(url)
+            u.pathname = u.pathname.replace(GEMINI_CALL, "/generate")
+            u.search = ""
+            url = u.toString()
+            body = geminiBody(decodeURIComponent(call[1]), body)
+          }
           // an EU org is served from Factory's EU region, an on-prem one
           // from its own host: the request goes there
           const to = llmBase(c)
           if (to !== API && url.startsWith(API)) url = to + url.slice(API.length)
           const h = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
           h.delete("x-api-key")
+          // the AI SDK's Google package's, with OpenCode's placeholder key
+          h.delete("x-goog-api-key")
           factoryHeaders(h, c)
           const model = byId.get(bodyModel(body))
           const path = new URL(url).pathname
@@ -1454,7 +1527,8 @@ export const FactoryAuthPlugin = async ({ client }) => {
           const anthropic = path.includes("/llm/a/") && (path.endsWith("/messages") || path.endsWith("/messages/count_tokens"))
           const adapted = anthropic ? wrapAnthropicTools(anthropicBody(body)) : { body: droidBody(path, body), names: new Set() }
           const out = adapted.body
-          if (out !== body) h.delete("content-length")
+          // the caller's length is of the body it sent, not of this one
+          if (out !== init?.body) h.delete("content-length")
           const res = await fetch(url, { ...init, method: init?.method ?? (input instanceof Request ? input.method : "POST"), headers: h, body: out })
           return path.endsWith("/messages") ? unwrapAnthropicTools(res, adapted.names) : res
         }
@@ -1501,4 +1575,4 @@ export const FactoryAuthPlugin = async ({ client }) => {
 }
 
 // for tests
-export const _internal = { limitWindows, windowEnd, dollars, vendorError, CORE, droidBody, DROID_LINE }
+export const _internal = { limitWindows, windowEnd, dollars, vendorError, CORE, droidBody, DROID_LINE, geminiBody }

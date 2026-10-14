@@ -66,16 +66,19 @@ Each model is served on the one API droid uses for it:
 | Anthropic Messages (`/api/llm/a`) | Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Sonnet 5.5, Sonnet 5, Sonnet 4.6, Haiku 5.5, Haiku 4.5, MiniMax M2.7 |
 | OpenAI Responses (`/api/llm/o/v1`) | GPT-6.1 Sol, GPT-6 Sol/Astra/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, GPT-5.3-Codex, Grok 4.7, Grok 4.6 |
 | Chat completions (`/api/llm/o/v1`) | GLM-5.3, GLM-5.3-Flash, GLM-5.2, Kimi K3, DeepSeek V4.1 Flash, Qwen3.8 Max, MiniMax M3, Mistral Large 4, Mistral Medium 3.5, Nemotron 3 Ultra |
+| Gemini generate (`/api/llm/g/v1/generate`) | Gemini 4 Argon, Gemini 3.1 Pro, Gemini 3.8/3.7/3.6/3.5 Flash, Gemini 3 Flash |
 
 Reasoning efforts are the variants droid offers for each model. DeepSeek V4.1
 Flash, Kimi K3 and GLM-5.2 have `none`, droid's "off": they stop thinking.
 Reasoning is mandatory on GLM-5.3 and GLM-5.3-Flash (Fireworks turns `none`
 away), so `low` is their least.
 
-The list is not included:
+Gemini's requests go to Factory's generate route with the model in the
+body, droid's line opening the system instruction. Gemini 4 Argon is behind
+a Factory feature flag in droid 0.241.1, so an account it isn't on for may
+be refused it.
 
-- Gemini, which Factory sends on a route of its own.
-- auto, which droid picks on the client side.
+auto is not included: droid picks it on the client side.
 
 ## Use
 

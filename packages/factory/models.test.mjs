@@ -61,9 +61,6 @@ test("every model in droid 0.240.0's picker is offered, or left out for a reason
   const reason = {
     // droid picks these itself, client side
     auto: "router", "auto-fast": "router",
-    // Gemini goes on a route of Factory's own
-    "gemini-3.1-pro-preview": "gemini", "gemini-3.8-flash": "gemini", "gemini-3.7-flash": "gemini",
-    "gemini-3.6-flash": "gemini", "gemini-3.5-flash": "gemini", "gemini-3-flash-preview": "gemini",
     // not released (unreleased:!0) or not in the registry
     "garnet-07-15": "unreleased", "atlas-07-21": "unreleased", "aster-07-15": "unreleased", inkling: "unreleased",
     // asks the user to accept Factory's high-cost terms first
@@ -79,4 +76,32 @@ test("every model in droid 0.240.0's picker is offered, or left out for a reason
   expect(missing).toEqual([])
   expect(entry("gpt-6-astra-ultrafast")).toContain('explicitOptInRequirement:{kind:"high_cost"')
   expect(got["gpt-6-astra-ultrafast"]).toBeUndefined()
+})
+
+// yetone/magpie#2080: droid 0.241.1 offers Gemini 4 Argon; the plugin
+// offered no Gemini at all. The cases are droid 0.241.1's entries.
+const DROID_241 = readFileSync(new URL("./testdata/droid-0.241.1-gemini.txt", import.meta.url), "utf8")
+
+test("droid 0.241.1's Gemini models are offered on Factory's Gemini route, as droid has them", async () => {
+  const got = await models()
+  const picker = JSON.parse(DROID_241.match(/^var y=(\[[^\]]*\]);/m)[1])
+  const gemini = picker.filter((id) => id.startsWith("gemini-"))
+  expect(gemini).toEqual(["gemini-4-argon", "gemini-3.1-pro-preview", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview"])
+  // I(total, output) states the total context, as P does in 0.240.0
+  expect(DROID_241).toContain("function I(o,t){return O({maxInputTokens:o-t,maxOutputTokens:t})}")
+  for (const id of gemini) {
+    const text = DROID_241.split("\n").find((l) => l.startsWith(`"${id}":{id:"${id}",`))
+    const m = got[id]
+    expect(m).toBeDefined()
+    expect(text).toContain('provider:"google"')
+    expect(m.name).toBe(text.match(/,name:"([^"]+)"/)[1])
+    const [, context, output] = text.match(/contextLimits:[Ik]\((\d+e\d+|\d+),(\d+)\)/)
+    expect(m.limit).toEqual({ context: Number(context), output: Number(output) })
+    expect(Object.keys(m.variants)).toEqual(JSON.parse(text.match(/reasoningEffort:\{supported:(\[[^\]]*\])/)[1]))
+    // droid takes images unless an entry says images:!1
+    expect(text).not.toContain("images:!1")
+    expect(m.attachment).toBe(true)
+    expect(m.provider).toEqual({ npm: "@ai-sdk/google", api: "https://api.factory.ai/api/llm/g/v1" })
+  }
+  expect(got["gemini-4-argon"].variants.high).toEqual({ thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } })
 })
