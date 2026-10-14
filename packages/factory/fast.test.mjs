@@ -99,3 +99,16 @@ test("a GPT Fast Mode model goes out as droid sends it: its own id at the priori
   expect(sent.model).toBe("gpt-6-sol")
   expect(sent.service_tier).toBe("priority")
 })
+
+// #119 (psylch, 0.1.27): magpie shows a provider with nothing picked only
+// the first 24 models of its list. Placed beside their base models, the Fast
+// Mode models pushed GPT-5.3-Codex, Grok and GLM out of those 24; listed
+// last, the first 24 are 0.1.26's again.
+test("the Fast Mode models come after every other model, so magpie's first 24 are the ones it showed before", async () => {
+  const { models } = await plugin()
+  const ids = Object.keys(models)
+  const first = ids.findIndex((id) => id.endsWith("-fast"))
+  expect(ids.slice(first).every((id) => id.endsWith("-fast"))).toBe(true)
+  expect(ids.slice(first)).toEqual(OFFERED)
+  for (const id of ["gpt-5.3-codex", "grok-4.7", "grok-4.6", "glm-5.3", "glm-5.3-flash"]) expect(ids.slice(0, 24)).toContain(id)
+})

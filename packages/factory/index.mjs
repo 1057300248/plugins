@@ -54,11 +54,8 @@ const MODELS = [
   ["claude-fable-5.1", "Fable 5.1", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-fable-5", "Fable 5", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-opus-5-5", "Opus 5.5", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
-  ["claude-opus-5-5-fast", "Opus 5.5 Fast Mode", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
   ["claude-opus-5", "Opus 5", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
-  ["claude-opus-5-fast", "Opus 5 Fast Mode", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-opus-4-8", "Opus 4.8", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
-  ["claude-opus-4-8-fast", "Opus 4.8 Fast Mode", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
   ["claude-sonnet-5-5", "Sonnet 5.5", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
   ["claude-sonnet-5", "Sonnet 5", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
   ["claude-sonnet-4-6", "Sonnet 4.6", ANTHROPIC, "anthropic", 931000, 64000, ["low", "medium", "high", "max"], true],
@@ -72,11 +69,8 @@ const MODELS = [
   ["gpt-5.6-terra", "GPT-5.6 Terra", RESPONSES, "openai", 1050000, 128000, E6, true],
   ["gpt-5.6-luna", "GPT-5.6 Luna", RESPONSES, "openai", 1050000, 128000, E6, true],
   ["gpt-5.5", "GPT-5.5", RESPONSES, "openai", 1050000, 128000, E4, true],
-  ["gpt-5.5-fast", "GPT-5.5 Fast Mode", RESPONSES, "openai", 1050000, 128000, E4, true],
   ["gpt-5.4", "GPT-5.4", RESPONSES, "openai", 1050000, 128000, E4, true],
-  ["gpt-5.4-fast", "GPT-5.4 Fast Mode", RESPONSES, "openai", 1050000, 128000, E4, true],
   ["gpt-5.3-codex", "GPT-5.3-Codex", RESPONSES, "openai", 400000, 128000, E4, true],
-  ["gpt-5.3-codex-fast", "GPT-5.3-Codex Fast Mode", RESPONSES, "openai", 400000, 128000, E4, true],
   ["grok-4.7", "Grok 4.7", RESPONSES, "xai", 500000, 63356, E4, true],
   ["grok-4.6", "Grok 4.6", RESPONSES, "xai", 200000, 63356, E4, true],
   // reasoning is mandatory on GLM-5.3 and GLM-5.3-Flash (Fireworks turns
@@ -100,6 +94,18 @@ const MODELS = [
   ["gemini-3.6-flash", "Gemini 3.6 Flash", GEMINI, "google", 1000000, 65536, ["low", "medium", "high"], true],
   ["gemini-3.5-flash", "Gemini 3.5 Flash", GEMINI, "google", 1000000, 65536, ["minimal", "low", "medium", "high"], true],
   ["gemini-3-flash-preview", "Gemini 3 Flash", GEMINI, "google", 1000000, 65536, ["minimal", "low", "medium", "high"], true],
+  // The Fast Mode models come last: magpie shows a provider with no models
+  // picked only the first 24 of its list, and placed beside their base
+  // models in 0.1.27 they pushed GPT-5.3-Codex, Grok 4.7, Grok 4.6, GLM-5.3
+  // and GLM-5.3-Flash out of it (#119, psylch). A Fast Mode model costs more credits, so it is the one
+  // to pick; asking its base model for fast reaches it all the same
+  // (fastBody).
+  ["claude-opus-5-5-fast", "Opus 5.5 Fast Mode", ANTHROPIC, "anthropic", 872000, 128000, E5, true],
+  ["claude-opus-5-fast", "Opus 5 Fast Mode", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
+  ["claude-opus-4-8-fast", "Opus 4.8 Fast Mode", ANTHROPIC, "anthropic", 867000, 128000, E5, true],
+  ["gpt-5.5-fast", "GPT-5.5 Fast Mode", RESPONSES, "openai", 1050000, 128000, E4, true],
+  ["gpt-5.4-fast", "GPT-5.4 Fast Mode", RESPONSES, "openai", 1050000, 128000, E4, true],
+  ["gpt-5.3-codex-fast", "GPT-5.3-Codex Fast Mode", RESPONSES, "openai", 400000, 128000, E4, true],
 ].map(([id, name, wire, upstream, context, output, efforts, images]) => ({ id, name, wire, upstream, context, output, efforts, images }))
 
 const byId = new Map(MODELS.map((m) => [m.id, m]))
