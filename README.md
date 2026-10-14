@@ -178,9 +178,31 @@ it can't. To list a plugin, add an entry with its npm `package`, a
 `summary` in English and Chinese (`{"en": …, "zh": …}`), and open a pull
 request.
 
-A new package's first version is published by hand before its pull request
-is merged: npm's trusted publishing, which publishes every later version
-from `main`, can't create a package. A magpie-community npm owner runs
-`scripts/publish.sh <otp>` on the pull request's branch and sets
-`.github/workflows/publish.yml` as the package's Trusted Publisher on
-npmjs.com. The pull request's `on-npm` check fails until then.
+## Publishing
+
+A version bump pushed to `main` publishes itself:
+`.github/workflows/publish.yml` publishes every package whose version
+isn't on npm yet. npm tries trusted publishing (OIDC) first, which needs
+the package to name `publish.yml` as its Trusted Publisher on npmjs.com.
+What that can't do, the repository's `NPM_TOKEN` secret does: a new
+package's first version (trusted publishing can't create a package) and a
+package whose Trusted Publisher isn't set. With the secret, merging a new
+package publishes it within minutes, and nobody publishes by hand.
+
+`NPM_TOKEN` is set once by an owner of the magpie-community npm org:
+
+1. On npmjs.com: avatar → Access Tokens → Generate New Token → Granular
+   Access Token. Name it `magpie-community/plugins publish`, tick *Bypass
+   two-factor authentication*, give *Packages and scopes* Read and write
+   on the `@magpie-community` scope, and the longest expiry npm allows.
+2. `gh secret set NPM_TOKEN -R magpie-community/plugins` and paste it.
+3. Re-run the latest `publish` run, or `gh workflow run publish.yml -R
+   magpie-community/plugins`.
+
+npm's write tokens expire (90 days at most). When one has, the publish
+run fails saying so; generate a new one and set the secret again.
+
+A pull request's `on-npm` check notes any package not on npm yet; with
+`NPM_TOKEN` set it is published when the pull request is merged. Without
+the secret, `scripts/publish.sh <otp>` from a magpie-community npm owner
+publishes it by hand.

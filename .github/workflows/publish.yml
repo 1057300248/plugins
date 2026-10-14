@@ -1,7 +1,11 @@
 # Publishes every package whose version isn't on npm yet, from GitHub
-# Actions with npm's trusted publishing (OIDC): no token and no one-time
-# password. Each package names this workflow as its trusted publisher on
-# npmjs.com (package → Settings → Trusted Publisher).
+# Actions. npm tries trusted publishing (OIDC) first: a package that names
+# this workflow as its Trusted Publisher on npmjs.com needs nothing else.
+# What OIDC can't do, the NPM_TOKEN secret does: a package's first version
+# (trusted publishing can't create one) and a package whose Trusted
+# Publisher isn't set. NPM_TOKEN is an npm granular access token of a
+# magpie-community owner: read and write to the @magpie-community scope,
+# 2FA bypassed. With it nobody publishes by hand.
 name: publish
 
 on:
@@ -31,3 +35,5 @@ jobs:
         run: HOME=$(mktemp -d) bun test
       - name: publish
         run: scripts/publish.sh
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
