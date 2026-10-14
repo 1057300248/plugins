@@ -23,6 +23,11 @@ const REFRESH_MARGIN = 5 * 60 * 1000 // a token this close to its end is renewed
 const LEAD_MS = REFRESH_MARGIN // and this close, magpie renews it ahead of time (auth.refresh)
 const LINK_WAIT = 30 * 1000
 const INSTALL = process.platform === "win32" ? "irm https://x.ai/cli/install.ps1 | iex" : "curl -fsSL https://x.ai/cli/install.sh | bash"
+// NO_CLI is what a sign-in without Grok Build says: how to install it, and
+// that one put somewhere else by hand (a container with no shell to run the
+// installer) is taken from GROK_BIN_DIR, as the installer's own folder is,
+// while one found on PATH has to be under a .grok folder (yetone/magpie#2223)
+const NO_CLI = `install Grok Build first: ${INSTALL}; or set GROK_BIN_DIR to the folder holding its grok binary`
 
 // the tool types Grok's backend takes; it turns the whole request away over another
 const TOOLS = new Set(["function", "web_search", "x_search", "image_generation", "collections_search", "file_search",
@@ -487,7 +492,7 @@ function newHome() {
 // sign-in stays as it is.
 async function signIn() {
   const exe = executable()
-  if (!exe) throw new Error(`install Grok Build first: ${INSTALL}`)
+  if (!exe) throw new Error(NO_CLI)
   const own = !!credential(cliHome())
   const home = own ? newHome() : cliHome()
   const { child, link, done, tail } = login(exe, home, own)
@@ -566,7 +571,7 @@ function cpaAuthFromFile(file) {
 }
 
 async function importCPA(inputs) {
-  if (!executable()) throw new Error(`install Grok Build first: ${INSTALL}`)
+  if (!executable()) throw new Error(NO_CLI)
   const rawPath = String(inputs?.path ?? "").trim()
   const file = resolve(rawPath === "~" ? homedir() : rawPath.startsWith("~/") ? join(homedir(), rawPath.slice(2)) : rawPath)
   if (!isFile(file)) throw new Error("choose a CPA Grok account JSON file")
@@ -596,7 +601,7 @@ function saved(home, c) {
 
 // current takes the sign-in the CLI already has, as it is.
 async function current() {
-  if (!executable()) throw new Error(`install Grok Build first: ${INSTALL}`)
+  if (!executable()) throw new Error(NO_CLI)
   const home = cliHome()
   if (!credential(home)) throw new Error("Grok Build is not signed in; run `grok login`, or sign in with the device code")
   const c = await token(home, false)

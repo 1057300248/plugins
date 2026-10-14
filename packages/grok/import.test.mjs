@@ -148,6 +148,8 @@ test("what isn't an enabled CPA xAI OAuth account is refused, with no home made"
 test("no Grok Build to refresh the sign-in with is refused first", async () => {
   sandbox({ exe: false })
   await expect(importFrom(cpaFile())).rejects.toThrow("install Grok Build first")
+  // one put in a folder of the user's choosing (magpie in Docker) is named too
+  await expect(importFrom(cpaFile())).rejects.toThrow("set GROK_BIN_DIR to the folder holding its grok binary")
 })
 
 test("a token that has already ended is still taken, its renewal left to the CLI", async () => {

@@ -10,6 +10,13 @@ curl -fsSL https://x.ai/cli/install.sh | bash          # macOS, Linux
 irm https://x.ai/cli/install.ps1 | iex                 # Windows
 ```
 
+It is found in the installer's folder (`GROK_BIN_DIR`, `GROK_HOME/bin`,
+`~/.grok/bin`), or on `PATH` when it lives under a `.grok` folder, so that
+another program named `grok` isn't taken for it. Where the installer can't
+run, such as a container without curl, put the binary in a folder of your
+own and set `GROK_BIN_DIR` to it. magpie installs Grok Build itself, as
+the installer does, before a sign-in that needs it.
+
 ## Sign in
 
 - **Sign in with Grok Build (device code)** runs `grok login --device-auth`
