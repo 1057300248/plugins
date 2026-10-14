@@ -18,7 +18,12 @@ const PATHS = { chat: "/chat/completions", responses: "/responses", anthropic: "
 const CORE_TOOLS = ["bash", "edit", "glob", "grep", "read"];
 const OPENCODE_VERSION = "1.19.0";
 // What OpenCode 1.19.0 sends as its User-Agent, ai-sdk and Bun included.
-const USER_AGENT = `opencode/${OPENCODE_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`;
+// Each protocol's ai-sdk package bundles its own provider-utils, so the
+// version differs by protocol (captured from the release binary's requests).
+const PROVIDER_UTILS = { chat: "4.0.23", responses: "4.0.40", anthropic: "4.0.46" };
+export function userAgent(protocol) {
+  return `opencode/${OPENCODE_VERSION} ai-sdk/provider-utils/${PROVIDER_UTILS[protocol]} runtime/bun/1.3.14`;
+}
 // How long a request for a model the last list didn't have waits before it
 // asks Zen's list again: a model Zen made free since is served at once,
 // and a model typed in by hand doesn't ask the list on every request.
@@ -282,41 +287,29 @@ async function server(_input, options = {}) {
             const toolPolicy = normalizeTools(body, protocol);
             if (protocol === "chat")
               body.stream_options = { ...body.stream_options, include_usage: true };
-            const headers = new Headers(request.headers);
-            for (const name of [
-              "authorization",
-              "x-api-key",
-              "x-goog-api-key",
-              "content-length",
-              "content-encoding",
-              "host",
-              "cookie",
-            ]) {
-              headers.delete(name);
-            }
-            headers.set("content-type", "application/json");
-            headers.set("accept", "text/event-stream");
-            headers.set("user-agent", USER_AGENT);
-            headers.set("x-opencode-client", "cli");
-            headers.set("x-opencode-request", opencodeID("msg", false));
-            if (!headers.has("x-opencode-project")) {
-              const project = _input?.project;
-              headers.set(
-                "x-opencode-project",
-                project?.vcs === "git" && project.id ? project.id : "global",
-              );
-            }
-            const session = sessionID(headers, body);
-            for (const name of [
-              "x-session-id",
-              "x-opencode-session",
-              "x-opencode-session-id",
-              "x-session-affinity",
-            ])
-              headers.set(name, session);
+            // Only what OpenCode 1.19.0 itself sends to its gateway, so a
+            // caller's own headers (an agent's User-Agent, x-stainless-*,
+            // x-session-affinity, ...) never mark the request as not
+            // OpenCode's (packages/opencode/src/session/llm/request.ts).
+            const given = request.headers;
+            const session = sessionID(given, body);
+            const project = _input?.project;
+            const headers = new Headers({
+              "content-type": "application/json",
+              accept: "*/*",
+              "user-agent": userAgent(protocol),
+              "x-opencode-project":
+                given.get("x-opencode-project") ||
+                (project?.vcs === "git" && project.id ? project.id : "global"),
+              "x-opencode-session": session,
+              "x-opencode-request": opencodeID("msg", false),
+              "x-opencode-client": "cli",
+              "x-opencode-session-id": session,
+            });
             if (protocol === "anthropic") {
               headers.set("x-api-key", "public");
-              if (!headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
+              headers.set("anthropic-version", given.get("anthropic-version") || "2023-06-01");
+              if (given.get("anthropic-beta")) headers.set("anthropic-beta", given.get("anthropic-beta"));
             } else {
               headers.set("authorization", "Bearer public");
             }

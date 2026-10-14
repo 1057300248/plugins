@@ -178,6 +178,53 @@ for (const [input, supplied, expected] of [
   });
 }
 
+// The headers OpenCode 1.19.0's release binary sends to opencode.ai/zen/v1,
+// captured on each protocol: these and no others, whatever the caller sent.
+for (const [path, model, utils, key] of [
+  ["chat/completions", "chat-free", "4.0.23", ["authorization"]],
+  ["responses", "responses-free", "4.0.40", ["authorization"]],
+  ["messages", "messages-free", "4.0.46", ["anthropic-version", "x-api-key"]],
+]) {
+  test(`${path}: sends OpenCode's own headers and none of the caller's`, async (t) => {
+    const { plugin, state, origin } = await fixture(t);
+    await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+    const loader = await plugin.auth.loader(publicAuth);
+    const response = await loader.fetch(`${origin}/v1/${path}`, {
+      method: "POST",
+      headers: {
+        "user-agent": "claude-cli/2.1.0",
+        "x-stainless-lang": "js",
+        "x-session-affinity": "header-parity-conversation",
+        "x-magpie-work-dir": "/tmp/x",
+        accept: "text/event-stream",
+      },
+      body: JSON.stringify({ model, stream: true }),
+    });
+    await response.text();
+    const sent = state.calls.at(-1).headers;
+    assert.equal(sent["user-agent"], `opencode/1.19.0 ai-sdk/provider-utils/${utils} runtime/bun/1.3.14`);
+    assert.equal(sent.accept, "*/*");
+    const own = Object.keys(sent).filter(
+      (name) => !["host", "connection", "content-length", "accept-encoding"].includes(name),
+    );
+    assert.deepEqual(
+      own.sort(),
+      [
+        "accept",
+        "content-type",
+        "user-agent",
+        "x-opencode-client",
+        "x-opencode-project",
+        "x-opencode-request",
+        "x-opencode-session",
+        "x-opencode-session-id",
+        ...key,
+      ].sort(),
+    );
+    assert.equal(sent["x-opencode-session-id"], sent["x-opencode-session"]);
+  });
+}
+
 test("aborts discovery immediately when the inference caller cancels", async (t) => {
   const { plugin, state, origin } = await fixture(t);
   const loader = await plugin.auth.loader(publicAuth);
@@ -290,8 +337,9 @@ test("forces upstream streaming, preserves existing tools and returns the SSE bo
   const sent = state.calls.at(-1);
   assert.equal(sent.headers.authorization, "Bearer public");
   assert.match(sent.headers["x-opencode-session"], /^ses_[0-9a-f]{9}ff[0-9a-f][0-9A-Za-z]{14}$/);
-  assert.equal(sent.headers["x-session-affinity"], sent.headers["x-opencode-session"]);
-  assert.equal(sent.headers["x-session-id"], sent.headers["x-opencode-session"]);
+  // OpenCode sends neither to its own gateway; a caller's never goes on.
+  assert.equal(sent.headers["x-session-affinity"], undefined);
+  assert.equal(sent.headers["x-session-id"], undefined);
   assert.equal(sent.headers["x-opencode-session-id"], sent.headers["x-opencode-session"]);
   assert.match(sent.headers["x-opencode-request"], /^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   assert.equal(sent.body.stream, true);
