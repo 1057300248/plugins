@@ -80,6 +80,16 @@ be refused it.
 
 auto is not included: droid picks it on the client side.
 
+## Requests too large
+
+Factory refuses a request body over its size limit with 413 "Request
+Entity Too Large". The limit is on bytes, not on the model's context, and
+images reach it first. On a 413 the plugin sends the request once more with
+every image and file but the newest replaced by a line saying it was left
+out, each tool result kept beside its call, as droid does. If that is still
+too large, or there was nothing to leave out, the error says it is
+Factory's byte limit: compact the conversation or start a new one.
+
 ## Use
 
 ```sh

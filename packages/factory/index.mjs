@@ -462,6 +462,89 @@ function geminiBody(model, body) {
   return JSON.stringify(m)
 }
 
+// ---- request size -------------------------------------------------------------
+//
+// Factory answers a request body over its size limit with 413 "Request
+// Entity Too Large": a limit on bytes, not on the model's context, which
+// the images an agent's session gathers reach long before its tokens do
+// (yetone/magpie#2082: nine screenshots, ~4.5 MB of data URLs, on Opus
+// 5.5). droid 0.239.0 leaves older images and PDFs out of such a request.
+// The plugin does the same once, on a 413: every image and file but the
+// newest KEEP_ATTACHMENTS becomes a line saying it was left out, in place,
+// so each tool result stays beside its call. Failing that, the 413 says
+// what it is and what to do.
+
+const KEEP_ATTACHMENTS = 1
+const LEFT_OUT = "[An earlier image or file was left out of this request: it was over Factory's request size limit.]"
+// what magpie's gateway adds to a 413 (internal/gateway/gateway.go,
+// writeError), said here too for OpenCode; the gateway, finding it, adds
+// it no second time
+const TOO_LARGE_HINT = "This is a request-body byte limit, not the model's context: compact the conversation (/compact in Codex or Claude Code), or start a new one with a short summary; fewer images or smaller tool results also help."
+
+// dialectOf is which API's body a request to path carries, as attachments
+// are found in it, or "" for one that has none to leave out.
+function dialectOf(path) {
+  if (path.includes("/llm/a/") && path.endsWith("/messages")) return "anthropic"
+  if (path.endsWith("/responses")) return "responses"
+  if (path.endsWith("/chat/completions")) return "chat"
+  if (GEMINI_CALL.test(path) || path.endsWith("/llm/g/v1/generate")) return "gemini"
+  return ""
+}
+
+const DIALECTS = {
+  anthropic: { list: "messages", is: (p) => p.type === "image" || p.type === "document", text: (p) => ({ type: "text", text: LEFT_OUT, ...(p.cache_control ? { cache_control: p.cache_control } : {}) }) },
+  responses: { list: "input", is: (p) => p.type === "input_image" || p.type === "input_file", text: () => ({ type: "input_text", text: LEFT_OUT }) },
+  chat: { list: "messages", is: (p) => p.type === "image_url" || p.type === "file", text: () => ({ type: "text", text: LEFT_OUT }) },
+  gemini: { list: "contents", is: (p) => !!(p.inlineData || p.inline_data || p.fileData || p.file_data), text: () => ({ text: LEFT_OUT }) },
+}
+
+// leaveOutAttachments is body, a request to path, with every image and file
+// but the newest KEEP_ATTACHMENTS left out, and how many were: null when
+// there are none to leave out or the body can't be read.
+function leaveOutAttachments(path, body) {
+  const d = DIALECTS[dialectOf(path)]
+  const text = d && bodyText(body)
+  if (!text) return null
+  let m
+  try {
+    m = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(m?.[d.list])) return null
+  // in the order they were sent: the array each is in, its place, and
+  // whether the array is a Gemini function response's parts, which take
+  // inline data alone
+  const found = []
+  const walk = (v, key) => {
+    if (Array.isArray(v)) {
+      v.forEach((p, i) => {
+        if (p && typeof p === "object" && !Array.isArray(p) && d.is(p)) found.push({ list: v, i, drop: key === "functionResponse" })
+        else walk(p, key)
+      })
+    } else if (v && typeof v === "object") {
+      for (const [k, x] of Object.entries(v)) walk(x, k === "functionResponse" ? k : key)
+    }
+  }
+  walk(m[d.list], "")
+  const out = found.slice(0, Math.max(found.length - KEEP_ATTACHMENTS, 0))
+  if (out.length === 0) return null
+  // from the last, so a part dropped doesn't move the places before it
+  for (const { list, i, drop } of out.reverse()) {
+    if (drop) list.splice(i, 1)
+    else list[i] = d.text(list[i])
+  }
+  return { body: JSON.stringify(m), left: out.length }
+}
+
+// tooLarge is what a 413 of Factory's says to the agent: Factory's own
+// words, that the limit is on bytes, what the plugin left out, and the hint.
+function tooLarge(text, left) {
+  const said = vendorError(text, "413")
+  const tried = left > 0 ? ` It was still too large with ${left} older image${left === 1 ? "" : "s"} or file${left === 1 ? "" : "s"} left out.` : ""
+  return `Factory refused the request as too large (${said}): it limits the size of a request's body in bytes.${tried} ${TOO_LARGE_HINT}`
+}
+
 // errorReply is an error as the API the request was for words one:
 // Anthropic's on /llm/a/, OpenAI's on the others.
 function errorReply(url, status, type, message, headers = new Headers()) {
@@ -1547,9 +1630,23 @@ export const FactoryAuthPlugin = async ({ client }) => {
             let renewed = false
             const onRenew = () => (renewed = true)
             const answer = (res) => said(res, renewed ? "renewed" : "kept")
+            // a 413: once more with the older images left out, then the
+            // refusal said for what it is (leaveOutAttachments)
+            const smaller = async (res) => {
+              const path = new URL(url).pathname
+              const less = leaveOutAttachments(path, body)
+              if (less) {
+                await res.body?.cancel()
+                res = await send(input, init, less.body, onRenew)
+                if (res.status !== 413) return res
+              }
+              const anthropic = path.includes("/llm/a/")
+              return errorReply(url, 413, anthropic ? "request_too_large" : "invalid_request_error", tooLarge(await res.text(), less?.left ?? 0), new Headers(res.headers))
+            }
             let res
             try {
               res = await send(input, init, body, onRenew)
+              if (res.status === 413) return answer(await smaller(res))
               if (res.status !== 403) return answer(res)
               let text = await res.text()
               if (await mendOrg(res.status, text, onRenew).catch(() => false)) {
@@ -1575,4 +1672,4 @@ export const FactoryAuthPlugin = async ({ client }) => {
 }
 
 // for tests
-export const _internal = { limitWindows, windowEnd, dollars, vendorError, CORE, droidBody, DROID_LINE, geminiBody }
+export const _internal = { limitWindows, windowEnd, dollars, vendorError, CORE, droidBody, DROID_LINE, geminiBody, leaveOutAttachments, LEFT_OUT, TOO_LARGE_HINT }
