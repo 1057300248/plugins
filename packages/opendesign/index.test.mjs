@@ -4,8 +4,12 @@ import {
   OpenDesignAuthPlugin,
 } from "./index.mjs"
 
+// bun test runs every package's files in one process: a fetch left
+// stubbed here answers every test file after this one
+const realFetch = globalThis.fetch
 afterEach(() => {
   mock.restore()
+  globalThis.fetch = realFetch
 })
 
 // ---- the sign-in it keeps ----------------------------------------------------
