@@ -180,29 +180,36 @@ request.
 
 ## Publishing
 
-A version bump pushed to `main` publishes itself:
-`.github/workflows/publish.yml` publishes every package whose version
-isn't on npm yet. npm tries trusted publishing (OIDC) first, which needs
-the package to name `publish.yml` as its Trusted Publisher on npmjs.com.
-What that can't do, the repository's `NPM_TOKEN` secret does: a new
-package's first version (trusted publishing can't create a package) and a
-package whose Trusted Publisher isn't set. With the secret, merging a new
-package publishes it within minutes, and nobody publishes by hand.
+A version bump pushed to `main` ships itself, two ways
+(`.github/workflows/publish.yml`):
 
-`NPM_TOKEN` is set once by an owner of the magpie-community npm org:
+- **dist**: every package's version is packed onto the `dist` branch
+  (`scripts/dist.mjs`): `tgz/<file>` and `index.json`, which names each
+  version's tarball and its sha512. magpie (0.1.1234 and later) installs a
+  `@magpie-community` package from there whenever npm doesn't have the
+  version: a new package, or one npm refused. It installs a tarball only
+  when the sha512 matches. This needs nobody, so **a new plugin is merged
+  as soon as its review is done**; it never waits for npm.
+- **npm**: every version npm doesn't have yet is published. npm tries
+  trusted publishing (OIDC) first, which needs the package to name
+  `publish.yml` as its Trusted Publisher on npmjs.com with `npm publish`
+  allowed. A trust made since 2026-09-03 allows only `npm stage publish`
+  unless told otherwise, so make it with `--allow-publish`:
 
-1. On npmjs.com: avatar → Access Tokens → Generate New Token → Granular
-   Access Token. Name it `magpie-community/plugins publish`, tick *Bypass
-   two-factor authentication*, give *Packages and scopes* Read and write
-   on the `@magpie-community` scope, and the longest expiry npm allows.
-2. `gh secret set NPM_TOKEN -R magpie-community/plugins` and paste it.
-3. Re-run the latest `publish` run, or `gh workflow run publish.yml -R
-   magpie-community/plugins`.
+  ```sh
+  npx npm@latest trust github <package> --file publish.yml \
+    --repo magpie-community/plugins --allow-publish \
+    --registry=https://registry.npmjs.org/ -y
+  ```
 
-npm's write tokens expire (90 days at most). When one has, the publish
-run fails saying so; generate a new one and set the secret again.
+A package's first version can't go through trusted publishing: a Trusted
+Publisher is set on a package that exists, and setting one takes an
+owner's 2FA. Until an owner of the magpie-community npm org
+publishes it (`scripts/publish.sh <otp>`) and sets its Trusted Publisher as
+above, magpie serves it from `dist`, and the publish run notes it without
+failing. The repository's `NPM_TOKEN` secret, a granular token with 2FA
+bypassed, still publishes a first version while npm lets such tokens
+publish (npm plans to end that in January 2027).
 
-A pull request's `on-npm` check notes any package not on npm yet; with
-`NPM_TOKEN` set it is published when the pull request is merged. Without
-the secret, `scripts/publish.sh <otp>` from a magpie-community npm owner
-publishes it by hand.
+A pull request's `on-npm` check notes any package not on npm yet. It is
+not a reason to hold the merge.
