@@ -636,6 +636,139 @@ function fitSchema(s, depth = 0) {
   return changed
 }
 
+// Kimi (kimi-k3-1) answers 11133 too, to the tools of an MCP server or a
+// plugin (clearmann, #122). Tried on the owner's account, 2026-10-14, each
+// alone in an otherwise plain chat: Kimi turns away an enum with no type
+// (["a","b"] as much as [1,"a",null]), an empty enum, an enum whose type
+// lists two types besides null, a schema that is true or false where a
+// schema goes (properties.x: true, items: true), a required that isn't a
+// list, and a type it doesn't know ("any", "String"). It takes an enum
+// typed T or [T, "null"], an anyOf of such enums, {"not": {}}, {}, and
+// additionalProperties: true or false. fitShape gives each the shape it
+// takes, meaning the same: none of it narrows or widens what a call may
+// hold, except an empty enum (which nothing fits) is left out.
+const TYPES = new Set(["string", "number", "integer", "boolean", "object", "array", "null"])
+
+// SUB_ONE are the keywords whose value is a schema, SUB_LIST a list of
+// schemas, SUB_MAP a map of names to schemas. additionalProperties and
+// unevaluatedProperties are left as they are when true or false.
+const SUB_ONE = ["items", "additionalItems", "unevaluatedItems", "contains", "not", "if", "then", "else", "propertyNames", "additionalProperties", "unevaluatedProperties"]
+const SUB_LIST = ["anyOf", "oneOf", "allOf", "prefixItems"]
+const SUB_MAP = ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]
+const BOOL_OK = new Set(["additionalProperties", "unevaluatedProperties"])
+
+// valueType is the JSON Schema type of an enum's value.
+function valueType(v) {
+  if (v === null) return "null"
+  if (Array.isArray(v)) return "array"
+  if (typeof v === "number") return Number.isInteger(v) ? "integer" : "number"
+  return typeof v
+}
+
+// fitEnum gives s's enum a type: the one its values have, or that and
+// "null"; values of several types are an anyOf of an enum for each. It
+// reports whether it changed anything.
+function fitEnum(s) {
+  if (!("enum" in s)) return false
+  if (!Array.isArray(s.enum) || s.enum.length === 0) {
+    delete s.enum
+    return true
+  }
+  const listed = Array.isArray(s.type) ? s.type : typeof s.type === "string" ? [s.type] : []
+  if (listed.filter((t) => t !== "null").length === 1) return false
+  const byType = new Map()
+  for (const v of s.enum) {
+    const t = valueType(v)
+    if (!byType.has(t)) byType.set(t, [])
+    byType.get(t).push(v)
+  }
+  if (byType.has("integer") && byType.has("number")) {
+    byType.get("number").push(...byType.get("integer"))
+    byType.delete("integer")
+  }
+  const hasNull = byType.delete("null")
+  if (byType.size <= 1) {
+    const [t] = byType.keys()
+    const want = t === undefined ? "null" : hasNull ? [t, "null"] : t
+    if (JSON.stringify(want) === JSON.stringify(s.type)) return false
+    s.type = want
+    return true
+  }
+  const split = [...byType].map(([t, vs]) => ({ type: t, enum: vs }))
+  if (hasNull) split.push({ type: "null" })
+  delete s.enum
+  delete s.type
+  if (Array.isArray(s.anyOf)) s.allOf = [...(Array.isArray(s.allOf) ? s.allOf : []), { anyOf: split }]
+  else s.anyOf = split
+  return true
+}
+
+// subSchema is v, a schema found under key, as an object Kimi takes: true
+// is {}, false is {"not": {}}.
+function subSchema(v, key) {
+  if (typeof v !== "boolean" || BOOL_OK.has(key)) return v
+  return v ? {} : { not: {} }
+}
+
+// fitShape mends s, a schema, and each schema under it, in place (see
+// TYPES above); a name under properties is never read as a keyword. It
+// reports whether it changed anything.
+function fitShape(s, depth = 0) {
+  if (!s || typeof s !== "object" || Array.isArray(s) || depth > 64) return false
+  let changed = false
+  if ("type" in s) {
+    const list = (Array.isArray(s.type) ? s.type : [s.type]).map((t) => (typeof t === "string" ? t.toLowerCase() : t)).filter((t) => TYPES.has(t))
+    const uniq = [...new Set(list)]
+    const want = uniq.length === 0 ? undefined : uniq.length === 1 ? uniq[0] : uniq
+    if (JSON.stringify(want) !== JSON.stringify(s.type)) {
+      if (want === undefined) delete s.type
+      else s.type = want
+      changed = true
+    }
+  }
+  if ("required" in s && !Array.isArray(s.required)) {
+    delete s.required
+    changed = true
+  } else if (Array.isArray(s.required) && s.required.some((k) => typeof k !== "string")) {
+    s.required = s.required.filter((k) => typeof k === "string")
+    changed = true
+  }
+  if (fitEnum(s)) changed = true
+  for (const k of SUB_ONE) {
+    if (!(k in s)) continue
+    const v = subSchema(s[k], k)
+    if (v !== s[k]) {
+      s[k] = v
+      changed = true
+    }
+    if (fitShape(v, depth + 1)) changed = true
+  }
+  for (const k of SUB_LIST) {
+    if (!Array.isArray(s[k])) continue
+    s[k].forEach((v0, i) => {
+      const v = subSchema(v0, k)
+      if (v !== v0) {
+        s[k][i] = v
+        changed = true
+      }
+      if (fitShape(v, depth + 1)) changed = true
+    })
+  }
+  for (const k of SUB_MAP) {
+    const m = s[k]
+    if (!m || typeof m !== "object" || Array.isArray(m)) continue
+    for (const [name, v0] of Object.entries(m)) {
+      const v = subSchema(v0, k)
+      if (v !== v0) {
+        m[name] = v
+        changed = true
+      }
+      if (fitShape(v, depth + 1)) changed = true
+    }
+  }
+  return changed
+}
+
 // localRef is the schema a local $ref in root names ("#/$defs/x",
 // "#/definitions/x"), or s itself.
 function localRef(root, s) {
@@ -698,8 +831,8 @@ function objectRoot(ps, root = ps, depth = 0) {
 }
 
 // fitTools mends b's function tools in place: their parameters (fitSchema,
-// objectRoot) and names. It reports whether it changed anything, and the
-// names it gave, each to the name the client knows (ours), so that the
+// fitShape, objectRoot) and names. It reports whether it changed anything,
+// and the names it gave, each to the name the client knows (ours), so that the
 // model's calls are named back. A call in the chat's history is named as
 // its tool now is.
 function fitTools(b) {
@@ -729,6 +862,7 @@ function fitTools(b) {
       continue
     }
     if (fitSchema(fn.parameters)) changed = true
+    if (fitShape(fn.parameters)) changed = true
     if (objectRoot(fn.parameters)) changed = true
   }
   if (theirs.size && Array.isArray(b.messages)) {
@@ -1558,4 +1692,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
+export const _internal = { fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }

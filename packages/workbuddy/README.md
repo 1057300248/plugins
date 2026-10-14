@@ -95,6 +95,14 @@ models to each shape below and Kimi's, GPT's, Gemini's and GLM's to some:
   `allOf`) at the root are an object, the union's fields merged;
 - a `pattern`'s `\0` is `\u0000`, which matches the same;
 - a tuple's `items` (a list) is one schema any of them fits;
+- an `enum` with no `type` takes its values' type (or that and `"null"`),
+  and an `enum` of several types is an `anyOf` of one typed `enum` for
+  each, at any depth; an empty `enum` is left out (Kimi and DeepSeek, an
+  MCP server's tools, #122);
+- `true` and `false` where a schema goes are `{}` and `{"not": {}}`
+  (`additionalProperties` is left); a `required` that isn't a list, and a
+  `type` JSON Schema doesn't name, are left out, and `"String"` is
+  `"string"`;
 - a tool's name with a character other than letters, digits, `_` and `-`
   (`.`, `:`, `/`, a space, CJK) is sent with `_` there, and the model's
   calls come back under the tool's own name.
