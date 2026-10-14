@@ -99,6 +99,15 @@ models to each shape below and Kimi's, GPT's, Gemini's and GLM's to some:
   (`.`, `:`, `/`, a space, CJK) is sent with `_` there, and the model's
   calls come back under the tool's own name.
 
+WorkBuddy AI's `gemini-3.8-flash` answers 400 "the conversation must end
+with a user message" (11153) to a chat whose tool results are followed by
+the user's message, as magpie sends Claude Code's reminders, words typed
+mid-task and a tool's images. Such a chat goes again with an empty
+assistant message between the results and the user's message, which it
+serves; a model that refused it once gets it that way from then on, until
+the plugin restarts. A chat ending with the assistant's message (a prefill)
+is refused as before.
+
 ## Models
 
 When you are signed in, the models are the ones WorkBuddy's product config

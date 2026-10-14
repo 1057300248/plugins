@@ -1262,7 +1262,37 @@ async function liveModels(site, a) {
 
 // ---- the plugins --------------------------------------------------------------
 
+// AFTER_TOOLS_REFUSED is WorkBuddy's 400 code 11153, "the conversation must
+// end with a user message", which WorkBuddy AI's gemini-3.8-flash answers to a
+// chat whose tool results are followed by the user's message (#113): Claude
+// Code's reminders, a user's words sent mid-task, a tool's images, which
+// magpie hands over in a user message after the results. It does end with a
+// user message; the same chat with any other message between them is served.
+// The code is matched whole, as with 14018.
+const AFTER_TOOLS_REFUSED = /must end with a user message|["']code["']\s*:\s*["']?11153(?![\d.])/i
+
+// replyAfterTools is a chat ending with tool results then the user's
+// message(s), with an empty assistant message between them, as if the model
+// had said nothing after the results. Tried with a real WorkBuddy AI
+// account on 2026-10-14: gemini-3.8-flash serves it and follows the user's
+// message as a user's, where folded into the tool's result it was read as
+// the tool's output and its ask left undone. null for any other chat — one
+// ending with the assistant's message is a prefill, refused as it is.
+function replyAfterTools(body) {
+  const b = chatOf(body)
+  const msgs = b?.messages
+  if (!Array.isArray(msgs)) return null
+  let i = msgs.length - 1
+  while (i >= 0 && msgs[i]?.role === "user") i--
+  if (i === msgs.length - 1 || i < 0 || msgs[i]?.role !== "tool") return null
+  msgs.splice(i + 1, 0, { role: "assistant", content: "" })
+  return JSON.stringify(b)
+}
+
 function makePlugin(site) {
+  // the models of this site that refused tool results then the user's
+  // message, for this run: their next chats go with replyAfterTools at once
+  const endsAfterTools = new Set()
   return async ({ client }) => ({
     config: async (config) => {
       config.provider ??= {}
@@ -1328,7 +1358,22 @@ function makePlugin(site) {
             const fit = fitted(body)
             body = normalizeToolChoice(fit.body)
             attend(headers, body, session)
-            const res = await fetch(req ? req.url : input, { ...init, method: init?.method ?? req?.method, headers, body })
+            const send = (b) => fetch(req ? req.url : input, { ...init, method: init?.method ?? req?.method, headers, body: b })
+            // a model known to turn tool results then the user's message away
+            // gets the empty reply between them up front (see endsAfterTools)
+            const model = chatOf(body)?.model
+            const quiet = endsAfterTools.has(model) ? replyAfterTools(body) : null
+            let res = await send(quiet ?? body)
+            if (res.status === 400 && !quiet) {
+              const text = await res.text()
+              const again = AFTER_TOOLS_REFUSED.test(text) ? replyAfterTools(body) : null
+              if (again) {
+                endsAfterTools.add(model)
+                res = await send(again)
+              } else {
+                res = new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
+              }
+            }
             return res.status >= 400 ? explained(res) : kept(await renamed(res, fit.names))
           },
         }
@@ -1468,4 +1513,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
+export const _internal = { replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
