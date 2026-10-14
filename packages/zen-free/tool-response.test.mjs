@@ -987,7 +987,8 @@ test("ordinary events retain SSE metadata without buffering", async () => {
   }
 });
 
-test("single SSE event limit is 32 MiB and cancels an unterminated upstream", async () => {
+// 32+ MiB through the guard, like the CRLF test below: not held to bun's 5 s default
+test("single SSE event limit is 32 MiB and cancels an unterminated upstream", { timeout: 60_000 }, async () => {
   let cancelled = false;
   let pulls = 0;
   const bytes = encoder.encode("x".repeat(1024 * 1024));
@@ -1014,7 +1015,8 @@ test("single SSE event limit is 32 MiB and cancels an unterminated upstream", as
   assert.ok(pulls <= 33);
 });
 
-test("cumulative pending chat tools are limited across choices and calls", async () => {
+// 32+ MiB through the guard, like the CRLF test below: not held to bun's 5 s default
+test("cumulative pending chat tools are limited across choices and calls", { timeout: 60_000 }, async () => {
   let cancelled = false;
   let pulls = 0;
   const argumentsChunk = "x".repeat(1024 * 1024);
@@ -1239,7 +1241,8 @@ test("downstream cancellation interrupts a pending upstream read", async () => {
   }
 });
 
-test("chat: completed tool buffers release their cumulative budget", async () => {
+// 32+ MiB through the guard, like the CRLF test below: not held to bun's 5 s default
+test("chat: completed tool buffers release their cumulative budget", { timeout: 60_000 }, async () => {
   let count = 0;
   const bytes = encoder.encode(
     event(chat({ tool_calls: [call("bash", 0, "x".repeat(1024 * 1024))] }, "tool_calls")),
@@ -1290,7 +1293,8 @@ test(
   },
 );
 
-test("text streams larger than 32 MiB are not subject to the pending-tool limit", async () => {
+// 32+ MiB through the guard, like the CRLF test below: not held to bun's 5 s default
+test("text streams larger than 32 MiB are not subject to the pending-tool limit", { timeout: 60_000 }, async () => {
   let count = 0;
   const bytes = encoder.encode(event(chat({ content: "x".repeat(1024 * 1024) })));
   const source = new Response(
