@@ -1187,6 +1187,8 @@ function modelOf(site, provider, m) {
     free: !!m.free,
     // magpie's own: the credits a request costs, as a multiple (0: none)
     rate: m.rate ?? 0,
+    // magpie's own: the price before a discount running now (0: none)
+    rateWas: m.rateWas ?? 0,
   }
 }
 
@@ -1210,6 +1212,53 @@ function freeCredits(c) {
   return creditsOf(c) === 0
 }
 
+// discountOf reads a promotion's price: its discountedCredits ("0.50x",
+// "0.00x"), else the factor times the model's own credits.
+function discountOf(p, base) {
+  const said = creditsOf(String(p.discount?.discountedCredits ?? "").trim().replace(/x$/i, ""))
+  if (said !== undefined) return said
+  const f = Number(p.discount?.factor)
+  return Number.isFinite(f) && f >= 0 && base !== undefined ? base * f : undefined
+}
+
+// running says whether a promotion is on at now: enabled, and inside its
+// validFrom..validUntil. Its daily hours are not looked at here.
+function running(p, now) {
+  if (!p || p.enabled === false) return false
+  const from = Date.parse(p.schedule?.validFrom ?? "")
+  const until = Date.parse(p.schedule?.validUntil ?? "")
+  return !(from > now) && !(until <= now)
+}
+
+// priceOf is a model's price as magpie keeps it, from its credits and the
+// config's modelPromotions (what WorkBuddy's picker shows as 限时免费,
+// 夜间免费, 夜间折扣). magpie keeps the list it is given until it asks
+// again, so a price that holds only some hours of the day (Hy4 preview,
+// free 23:00–8:00 only) is given as its full price, never as free: a list
+// asked for at night would otherwise say "free" all day (#121). A discount
+// for whole days (Step-5-Preview's 独家限免) is the price now, with the
+// price before it as rateWas.
+function priceOf(d, promotions, now = Date.now()) {
+  const base = creditsOf(d.credits)
+  const mine = (Array.isArray(promotions) ? promotions : []).filter(
+    (p) => p?.kind === "discount" && Array.isArray(p.modelIds) && p.modelIds.includes(d.id) && running(p, now),
+  )
+  if (mine.some((p) => Array.isArray(p.schedule?.daily) && p.schedule.daily.length)) {
+    // by the hour: the full price, which the credits are unless a night
+    // discount already took them to its own price
+    const night = mine.filter((p) => p.discount && Array.isArray(p.schedule?.daily) && p.schedule.daily.length)
+    if (base === undefined || (base === 0 && night.some((p) => discountOf(p, base) === 0))) return { free: false }
+    return { free: false, rate: base }
+  }
+  const off = mine.filter((p) => p.discount).map((p) => discountOf(p, base)).filter((r) => r !== undefined)
+  if (off.length) {
+    const r = Math.min(...off)
+    return { free: r === 0, rate: r, ...(base !== undefined && base > r ? { rateWas: base } : {}) }
+  }
+  if (base === undefined) return {}
+  return { free: base === 0, rate: base }
+}
+
 async function liveModels(site, a) {
   const headers = new Headers()
   sign(site, a, headers)
@@ -1231,11 +1280,7 @@ async function liveModels(site, a) {
         m.context = d.maxInputTokens
         m.output = d.maxOutputTokens
         m.images = d.supportsImages === true && !textOnly(site, id)
-        const r = creditsOf(d.credits)
-        if (r !== undefined) {
-          m.free = r === 0
-          m.rate = r
-        }
+        Object.assign(m, priceOf(d, cfg.modelPromotions))
         const es = d.reasoning?.supportedEfforts ?? []
         if (es.length) {
           const canOff = d.reasoning?.canDisableThinking
@@ -1513,4 +1558,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
+export const _internal = { replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
