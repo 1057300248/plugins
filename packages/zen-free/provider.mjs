@@ -10,12 +10,26 @@ import {
 import { collapseResponse } from "./stream.mjs";
 import { guardToolResponse } from "./tool-response.mjs";
 
-const DEFAULT_BASE = "https://opencode.ai/zen/v1";
+// Zen's free models answer only at the inference API since mid-October
+// 2026: the same request OpenCode 1.19.0 sends answers 403 FreeTierError
+// at /zen/v1 and 200 here, and models.dev gives OpenCode this URL. A model
+// listed before then still names /zen/v1 (LEGACY_BASE), which is asked here.
+const DEFAULT_BASE = "https://opencode.ai/inference/v1";
+const LEGACY_BASE = "https://opencode.ai/zen/v1";
 const CATALOG = "https://models.opencode.ai/api.json";
 const DOCS =
   "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/zen.mdx";
 const PATHS = { chat: "/chat/completions", responses: "/responses", anthropic: "/messages" };
 const CORE_TOOLS = ["bash", "edit", "glob", "grep", "read"];
+// The parameter each stand-in takes, OpenCode's own first one: Zen's free
+// tier answers 403 FreeTierError to bash or read offered with none.
+const CORE_PARAMETER = {
+  bash: "command",
+  edit: "filePath",
+  glob: "pattern",
+  grep: "pattern",
+  read: "filePath",
+};
 const OPENCODE_VERSION = "1.19.0";
 // What OpenCode 1.19.0 sends as its User-Agent, ai-sdk and Bun included.
 // Each protocol's ai-sdk package bundles its own provider-utils, so the
@@ -76,7 +90,11 @@ function normalizeTools(body, protocol) {
   }
   for (const name of CORE_TOOLS) {
     if (present.has(name)) continue;
-    const parameters = { type: "object", properties: {}, additionalProperties: false };
+    const parameters = {
+      type: "object",
+      properties: { [CORE_PARAMETER[name]]: { type: "string" } },
+      additionalProperties: false,
+    };
     const definition = { name, description: "Not available. Never call this tool." };
     body.tools.push(
       protocol === "chat"
@@ -245,7 +263,9 @@ async function server(_input, options = {}) {
             requirePublic(await getAuth());
             const request = new Request(input, init);
             const protocol = Object.keys(PATHS).find(
-              (key) => request.url === `${baseURL}${PATHS[key]}`,
+              (key) =>
+                request.url === `${baseURL}${PATHS[key]}` ||
+                (baseURL === DEFAULT_BASE && request.url === `${LEGACY_BASE}${PATHS[key]}`),
             );
             if (!protocol || request.method !== "POST")
               throw new Error("Unsupported Zen endpoint or method");
@@ -313,7 +333,7 @@ async function server(_input, options = {}) {
             } else {
               headers.set("authorization", "Bearer public");
             }
-            const response = await fetch(request.url, {
+            const response = await fetch(`${baseURL}${PATHS[protocol]}`, {
               method: "POST",
               headers,
               body: JSON.stringify(body),

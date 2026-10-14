@@ -39,7 +39,7 @@ remaining-quota data.
 
 ## Requests
 
-Requests go to `https://opencode.ai/zen/v1` using each model's native
+Requests go to `https://opencode.ai/inference/v1` using each model's native
 Chat Completions, Responses or Anthropic Messages API. Streaming and
 ordinary JSON replies are supported.
 

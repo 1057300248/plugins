@@ -119,7 +119,8 @@ for (const { protocol, path, model } of protocols) {
           const tool = protocol === "chat" ? raw.function : raw;
           assert.match(tool.description, /Not available\. Never call this tool\./);
           assert.equal((tool.parameters ?? tool.input_schema).additionalProperties, false);
-          assert.deepEqual((tool.parameters ?? tool.input_schema).properties, {});
+          // Zen's free tier refuses a bash or read that takes nothing
+          assert.equal(Object.keys((tool.parameters ?? tool.input_schema).properties).length, 1);
         }
         // A call of a tool the agent doesn't have is left out, said in
         // the reply's text, and the turn ends as a stop rather than
@@ -517,4 +518,43 @@ test("a Chat stream Zen closes before its [DONE] ends cut short for a streaming 
   const whole = await send(false);
   assert.notEqual(whole.status, 200);
   assert.match(await whole.text(), /without a completion marker \(reply x2, 3 events/);
+});
+
+// Zen's free tier answers only at the inference API since mid-October 2026
+// (403 FreeTierError at /zen/v1 to OpenCode's own request); a model listed
+// before then, whose URL is /zen/v1, is asked there too.
+test("asks the inference API, also for a model listed at /zen/v1", async (t) => {
+  const { default: plugin } = await subject;
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    asked.push(url);
+    if (url.endsWith("/models"))
+      return Response.json({ data: [{ id: "big-pickle" }] });
+    if (url.endsWith("/chat/completions"))
+      return new Response('data: {"choices":[{"index":0,"delta":{"content":"pong"}}]}\n\ndata: [DONE]\n\n', {
+        headers: { "content-type": "text/event-stream" },
+      });
+    return new Response("", { status: 500 });
+  };
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+  const hooks = await plugin.server({ project: { id: "x" } });
+  const loader = await hooks.auth.loader(async () => ({ type: "api", key: "public" }));
+  assert.equal(loader.baseURL, "https://opencode.ai/inference/v1");
+  for (const url of [
+    "https://opencode.ai/zen/v1/chat/completions",
+    "https://opencode.ai/inference/v1/chat/completions",
+  ]) {
+    const response = await loader.fetch(url, {
+      method: "POST",
+      body: JSON.stringify({ model: "big-pickle", stream: true, messages: [] }),
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.equal(asked.at(-1), "https://opencode.ai/inference/v1/chat/completions");
+  }
+  assert.ok(!asked.some((url) => url.startsWith("https://opencode.ai/zen/")), asked.join("\n"));
 });
