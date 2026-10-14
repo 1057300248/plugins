@@ -992,13 +992,35 @@ const eventName = (s) =>
     .toLowerCase()
     .replace(/^_|_$/g, "")
 
-// usageOf maps Trae's token counts to OpenAI's
+// tokensOf maps Trae's token counts to OpenAI's. Trae's token_usage event
+// (TRAE SOLO CN's ai-agent, TokenUsageEvent: name, prompt_tokens,
+// completion_tokens, total_tokens, reasoning_tokens,
+// cache_creation_input_tokens, cache_read_input_tokens,
+// prompt_tokens_total, completion_tokens_total) says what the prompt cache
+// read and wrote under Anthropic's names. They go on under those names,
+// which magpie reads beside prompt_tokens as it reads a relay's in front of
+// Claude (whether prompt_tokens counts them too is judged there, by
+// whether it is at least as big); without them every request read as no
+// cache hit (01huadalang on magpie's Discord: K3, 53 calls, all 0)
 function tokensOf(u) {
   if (!u || typeof u !== "object") return null
-  const p = Number(u.prompt_tokens ?? u.input_tokens ?? u.promptTokens ?? u.inputTokens ?? 0) || 0
-  const c = Number(u.completion_tokens ?? u.output_tokens ?? u.completionTokens ?? u.outputTokens ?? 0) || 0
+  const n = (...v) => Number(v.find((x) => x != null) ?? 0) || 0
+  const p = n(u.prompt_tokens, u.input_tokens, u.promptTokens, u.inputTokens)
+  const c = n(u.completion_tokens, u.output_tokens, u.completionTokens, u.outputTokens)
   if (!p && !c) return null
-  return { prompt_tokens: p, completion_tokens: c, total_tokens: Number(u.total_tokens ?? u.totalTokens) || p + c }
+  const out = { prompt_tokens: p, completion_tokens: c, total_tokens: n(u.total_tokens, u.totalTokens) || p + c }
+  const read = n(u.prompt_tokens_details?.cached_tokens)
+  const write = n(u.prompt_tokens_details?.cache_write_tokens)
+  if (read || write) out.prompt_tokens_details = { cached_tokens: read, ...(write ? { cache_write_tokens: write } : {}) }
+  else {
+    const r = n(u.cache_read_input_tokens, u.cacheReadInputTokens)
+    const w = n(u.cache_creation_input_tokens, u.cacheCreationInputTokens)
+    if (r) out.cache_read_input_tokens = r
+    if (w) out.cache_creation_input_tokens = w
+  }
+  const thought = n(u.reasoning_tokens, u.completion_tokens_details?.reasoning_tokens)
+  if (thought) out.completion_tokens_details = { reasoning_tokens: thought }
+  return out
 }
 
 let callSeq = 0

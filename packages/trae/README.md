@@ -107,6 +107,10 @@ agent's `POST https://trae-api-cn.mchost.guru/api/agent/v3/llm_utils_chat`:
     Text under `message`, `delta` or an event with no name is the answer's
     too.
   - `token_usage`, `done` and `error` mark usage, the end and failures.
+    What `token_usage` says the prompt cache read and wrote
+    (`cache_read_input_tokens`, `cache_creation_input_tokens`) goes on under
+    those names, and `reasoning_tokens` as
+    `completion_tokens_details.reasoning_tokens`.
     `done`'s `finish_reason` `length`/`max_tokens` is OpenAI's `length`.
   - Queue events are ignored.
   - A `{"reasoning_content": …}` object written into the text is reasoning,
