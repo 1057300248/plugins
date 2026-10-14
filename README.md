@@ -185,7 +185,7 @@ A version bump pushed to `main` ships itself, two ways
 
 - **dist**: every package's version is packed onto the `dist` branch
   (`scripts/dist.mjs`): `tgz/<file>` and `index.json`, which names each
-  version's tarball and its sha512. magpie (0.1.1234 and later) installs a
+  version's tarball and its sha512. magpie (0.1.1243 and later) installs a
   `@magpie-community` package from there whenever npm doesn't have the
   version: a new package, or one npm refused. It installs a tarball only
   when the sha512 matches. This needs nobody, so **a new plugin is merged
