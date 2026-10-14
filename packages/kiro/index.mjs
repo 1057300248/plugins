@@ -503,7 +503,9 @@ function account(client) {
 const windows = new Map() // a model's context, as Kiro last listed it
 
 const thinks = (id) => /claude/i.test(id) || id === "auto"
-const BUDGETS = { low: 10000, medium: 20000, high: 30000, max: 50000 }
+// the levels a thinking model offers, as the built-in thinks them (xhigh as
+// long as max: #120)
+const BUDGETS = { low: 10000, medium: 20000, high: 30000, xhigh: 50000, max: 50000 }
 
 function configModel(m) {
   return {
@@ -1516,4 +1518,4 @@ export async function KiroAuthPlugin({ client } = {}) {
 }
 
 // for tests
-export const _internal = { generate, refresh, usageOf, buildKiro, events, reply, failure, toolID, toolName, toolNames, thinking, readCLI, readIDE, regionOf, planName, frames }
+export const _internal = { generate, refresh, usageOf, buildKiro, events, reply, failure, toolID, toolName, toolNames, thinking, configModel, runtimeModel, readCLI, readIDE, regionOf, planName, frames }

@@ -85,7 +85,8 @@ request:
   tool calls and usage. When Kiro reports only how full the context is,
   input tokens are estimated from that.
 - Thinking (Claude models and Auto) is asked for the way kiro-cli asks, in
-  the prompt, with a budget: low 10k, medium 20k, high 30k, max 50k. The
+  the prompt, with a budget: low 10k, medium 20k, high 30k, xhigh and max
+  50k (as magpie's built-in Kiro: #120). The
   `<thinking>` block of the reply comes back as thinking.
 - Kiro's failures keep their meaning:
   - input too long → 400
