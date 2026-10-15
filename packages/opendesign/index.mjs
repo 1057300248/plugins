@@ -21,7 +21,28 @@ import { MODELS } from "./models.mjs"
 const ID = "opendesign"
 const CONTROL = "https://amr-api.open-design.ai"
 const LINK = "https://amr-link.open-design.ai/v1"
-const NPM = "@ai-sdk/openai" // the Responses API, at LINK
+// WHICH API each model is asked on: magpie reads the protocol off the AI SDK
+// package a model declares (its api.npm) — "@ai-sdk/openai" is the Responses
+// API, "@ai-sdk/anthropic" Anthropic's messages, the compatible package chat
+// completions. amr-link answers thinking on a different one per model
+// (sryimnoob123's measurements, plugins#141: a streaming request to each model
+// on each of the three): chat completions carries the thinking of ten of the
+// eleven; deepseek-v4-pro and claude-haiku-5.5 think longer on Responses, and
+// glm-5.3-flash only thinks on Anthropic's messages among the two others.
+const WIRE = {
+  chat: "@ai-sdk/openai-compatible",
+  responses: "@ai-sdk/openai",
+  anthropic: "@ai-sdk/anthropic",
+}
+const MODEL_WIRE = {
+  "claude-haiku-5.5": "responses",
+  "deepseek-v4-pro": "responses",
+  "glm-5.3-flash": "anthropic",
+}
+const wireOf = (id) => WIRE[MODEL_WIRE[id]] ?? WIRE.chat
+// the provider's own default: a model this plugin doesn't name is asked on
+// chat completions, where ten of the eleven thought
+const NPM = WIRE.chat
 const SOURCE = "opencode-opendesign-auth/" + pkg.version // as the manifest has it
 const CLI_VERSION = "0.1.4" // what the sign-in says it is, as the CLI does
 const TIMEOUT = 20_000
@@ -261,6 +282,9 @@ function modelOf(id, m) {
     tool_call: true,
     reasoning: thinking,
     ...(levels.length && { variants: Object.fromEntries(levels.map((e) => [e, { reasoningEffort: e }])) }),
+    // the API magpie asks this model on (WIRE above), per model
+    api: { npm: wireOf(id) },
+    provider: { npm: wireOf(id) },
     ...(rate && { rate }),
     limit: {
       context: Number.isFinite(context) && context > 0 ? context : 200_000,
@@ -284,7 +308,7 @@ function servedOf(id, m) {
   return {
     id,
     name: c.name,
-    api: { id, url: LINK, npm: NPM },
+    api: { id, url: LINK, npm: wireOf(id) },
     status: "active",
     headers: {},
     options: {},
@@ -400,12 +424,19 @@ export const OpenDesignAuthPlugin = async () => {
     config: async (cfg) => {
       cfg.provider ??= {}
       const was = cfg.provider[ID] ?? {}
+      // the wire is this plugin's to declare, never a kept copy's: magpie
+      // hands back what the hook last wrote, and a model kept from 0.1.5
+      // would otherwise stay on the Responses API it chose for every model
+      const models = { ...seed(), ...(was.models ?? {}) }
+      for (const [id, m] of Object.entries(models)) {
+        models[id] = { ...m, api: { ...(m.api ?? {}), npm: wireOf(id) }, provider: { ...(m.provider ?? {}), npm: wireOf(id) } }
+      }
       cfg.provider[ID] = {
         name: "Open Design",
-        npm: NPM,
         api: LINK,
         ...was,
-        models: { ...seed(), ...(was.models ?? {}) },
+        npm: NPM,
+        models,
       }
     },
     // the plan decides which models an account gets, so the list is read

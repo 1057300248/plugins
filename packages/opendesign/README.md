@@ -81,9 +81,12 @@ The script keeps the names and measured levels already there — the catalog
 carries neither — and reads nothing else: no secret is written to the file or
 printed.
 
-Requests go to the **Responses** API (`@ai-sdk/openai` at
-`https://amr-link.open-design.ai/v1`), which is what an Open Design API key
-page recommends for Codex-style clients and what keeps thinking intact.
+Requests go to `https://amr-link.open-design.ai/v1`, each model on the API
+amr-link answers its thinking on (measured, plugins#141): chat completions
+(`@ai-sdk/openai-compatible`) for most, the Responses API (`@ai-sdk/openai`)
+for `claude-haiku-5.5` and `deepseek-v4-pro`, and Anthropic's messages
+(`@ai-sdk/anthropic`) for `glm-5.3-flash`. Every model reasons at `low`,
+`high` and `max`.
 
 ## Where the sign-in is kept
 

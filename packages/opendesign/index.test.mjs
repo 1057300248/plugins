@@ -150,7 +150,7 @@ test("the account's list is the vendor's own, live", () => {
   expect(models["gpt-6-luna"]).toEqual({
     id: "gpt-6-luna",
     name: "GPT-6 Luna",
-    api: { id: "gpt-6-luna", url: "https://amr-link.open-design.ai/v1", npm: "@ai-sdk/openai" },
+    api: { id: "gpt-6-luna", url: "https://amr-link.open-design.ai/v1", npm: "@ai-sdk/openai-compatible" },
     status: "active",
     headers: {},
     options: {},
@@ -180,12 +180,13 @@ test("the account's list is the vendor's own, live", () => {
   })
 })
 
-// #137 (sryimnoob123): amr-link took reasoning_effort low and high on all 11
+// #137 (sryimnoob123): amr-link took reasoning_effort low and high (max too,
+// plugins#141) on all 11
 // models, and every one but GPT-6 Luna thought at it, "standard" or not
 test("a signed-in account's models reason at the levels amr-link took (#137)", () => {
   const models = I.modelsOf(CATALOG)
-  expect(asMagpieReads(models["deepseek-v4-pro"])).toEqual({ reasoning: true, variants: ["low", "high"], image: false })
-  expect(models["deepseek-v4-pro"].variants).toEqual({ low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } })
+  expect(asMagpieReads(models["deepseek-v4-pro"])).toEqual({ reasoning: true, variants: ["low", "high", "max"], image: false })
+  expect(models["deepseek-v4-pro"].variants).toEqual({ low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" }, max: { reasoningEffort: "max" } })
   // took the level and never thought at it
   expect(asMagpieReads(models["gpt-6-luna"])).toEqual({ reasoning: false, variants: [], image: true })
   // "advanced" but never measured: it reasons, at no level said for it
@@ -194,7 +195,7 @@ test("a signed-in account's models reason at the levels amr-link took (#137)", (
   const standard = I.modelsOf({
     data: ["claude-haiku-5.5", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "mimo-v2.6-flash"].map((id) => ({ id, metadata: { capability: "standard" } })),
   })
-  for (const m of Object.values(standard)) expect(asMagpieReads(m)).toMatchObject({ reasoning: true, variants: ["low", "high"] })
+  for (const m of Object.values(standard)) expect(asMagpieReads(m)).toMatchObject({ reasoning: true, variants: ["low", "high", "max"] })
 })
 
 test("the seed's models carry the measured levels as the config's variants", async () => {
@@ -204,17 +205,17 @@ test("the seed's models carry the measured levels as the config's variants", asy
   const models = cfg.provider.opendesign.models
   const levels = Object.fromEntries(Object.entries(models).map(([id, m]) => [id, m.reasoning ? Object.keys(m.variants ?? {}) : null]))
   expect(levels).toEqual({
-    "claude-haiku-5.5": ["low", "high"],
-    "deepseek-v4-flash": ["low", "high"],
-    "deepseek-v4-flash-vision-exp": ["low", "high"],
-    "deepseek-v4-pro": ["low", "high"],
-    "deepseek-v4.1-flash": ["low", "high"],
-    "glm-5.3-flash": ["low", "high"],
-    "glm-5.3-flashx": ["low", "high"],
+    "claude-haiku-5.5": ["low", "high", "max"],
+    "deepseek-v4-flash": ["low", "high", "max"],
+    "deepseek-v4-flash-vision-exp": ["low", "high", "max"],
+    "deepseek-v4-pro": ["low", "high", "max"],
+    "deepseek-v4.1-flash": ["low", "high", "max"],
+    "glm-5.3-flash": ["low", "high", "max"],
+    "glm-5.3-flashx": ["low", "high", "max"],
     "gpt-6-luna": null,
-    "kimi-k2.7-code": ["low", "high"],
-    "mimo-v2.6-flash": ["low", "high"],
-    "mimo-v2.6-pro": ["low", "high"],
+    "kimi-k2.7-code": ["low", "high", "max"],
+    "mimo-v2.6-flash": ["low", "high", "max"],
+    "mimo-v2.6-pro": ["low", "high", "max"],
   })
   expect(models["claude-haiku-5.5"].variants.high).toEqual({ reasoningEffort: "high" })
 })
@@ -222,6 +223,23 @@ test("the seed's models carry the measured levels as the config's variants", asy
 test("an empty catalog is no models", () => {
   expect(I.modelsOf({ data: [] })).toEqual({})
   expect(I.modelsOf(null)).toEqual({})
+})
+
+test("each model is asked on the API amr-link thinks on (plugins#141)", async () => {
+  expect(I.modelsOf(CATALOG)["deepseek-v4-pro"].api.npm).toBe("@ai-sdk/openai")
+  expect(I.modelsOf(CATALOG)["gpt-6-luna"].api.npm).toBe("@ai-sdk/openai-compatible")
+  // a model kept from 0.1.5, which put every model on the Responses API,
+  // is moved to its own wire
+  const kept = { "glm-5.3-flash": { id: "glm-5.3-flash", name: "GLM", provider: { npm: "@ai-sdk/openai" }, api: { npm: "@ai-sdk/openai" } } }
+  const cfg = { provider: { opendesign: { npm: "@ai-sdk/openai", models: kept } } }
+  await (await OpenDesignAuthPlugin({})).config(cfg)
+  const p = cfg.provider.opendesign
+  expect(p.npm).toBe("@ai-sdk/openai-compatible")
+  expect(p.models["glm-5.3-flash"].provider.npm).toBe("@ai-sdk/anthropic")
+  expect(p.models["glm-5.3-flash"].api.npm).toBe("@ai-sdk/anthropic")
+  expect(p.models["glm-5.3-flash"].name).toBe("GLM")
+  expect(p.models["claude-haiku-5.5"].provider.npm).toBe("@ai-sdk/openai")
+  expect(p.models["kimi-k2.7-code"].provider.npm).toBe("@ai-sdk/openai-compatible")
 })
 
 // ---- what magpie is given ----------------------------------------------------
@@ -232,7 +250,7 @@ test("the plugin declares the provider and answers its methods", async () => {
   await hooks.config(cfg)
   expect(cfg.provider.opendesign).toMatchObject({
     name: "Open Design",
-    npm: "@ai-sdk/openai",
+    npm: "@ai-sdk/openai-compatible",
     api: "https://amr-link.open-design.ai/v1",
   })
   // the seed models.mjs carries, which a signed-in account's list replaces
@@ -240,10 +258,12 @@ test("the plugin declares the provider and answers its methods", async () => {
   expect(cfg.provider.opendesign.models["deepseek-v4.1-flash"]).toEqual({
     id: "deepseek-v4.1-flash",
     name: "DeepSeek V4.1 Flash",
+    api: { npm: "@ai-sdk/openai-compatible" },
+    provider: { npm: "@ai-sdk/openai-compatible" },
     attachment: true,
     tool_call: true,
     reasoning: true,
-    variants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } },
+    variants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" }, max: { reasoningEffort: "max" } },
     rate: "x0.5",
     limit: { context: 1048000, output: 232000 },
     modalities: { input: ["text", "image"], output: ["text"] },
