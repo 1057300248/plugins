@@ -44,6 +44,8 @@
     { "package": "@magpie-community/middleware-think-tags", "name": "Think Tags", "kind": "middleware", "community": true,
       "summary": { "en": "Take a model's <think>…</think> out of its reply's text, or put a Chat reply's reasoning into it.", "zh": "去掉回复正文开头的 <think>…</think>，或把 Chat 回复的思考内容放进正文。" } },
     { "package": "@magpie-community/agent-aider", "name": "Aider", "kind": "agent", "community": true,
-      "summary": { "en": "Aider (aider.chat) on magpie's Agents page: pick one of magpie's models for it, and switch it off to put its config back.", "zh": "把 Aider（aider.chat）加到 magpie 的 Agent 页：给它选 magpie 的模型，关掉即恢复它原来的配置。" } }
+      "summary": { "en": "Aider (aider.chat) on magpie's Agents page: pick one of magpie's models for it, and switch it off to put its config back.", "zh": "把 Aider（aider.chat）加到 magpie 的 Agent 页：给它选 magpie 的模型，关掉即恢复它原来的配置。" } },
+    { "package": "@magpie-community/agent-type4me", "name": "Type4Me", "kind": "agent", "community": true,
+      "summary": { "en": "Type4Me (macOS voice input) on magpie's Agents page: pick one of magpie's models for its LLM post-processing, used from the next dictation.", "zh": "把 Type4Me（macOS 语音输入）加到 magpie 的 Agent 页：给它的 LLM 后处理选 magpie 的模型，下一次语音输入即生效。" } }
   ]
 }
