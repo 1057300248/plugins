@@ -382,27 +382,38 @@ function piSummary(text) {
   return text
 }
 
-// promptOpenings adapts clientOpening in the system and developer messages
-// of msgs (chat completions' messages, Responses' input), and piSummary in
-// their user messages, their string content or text parts: false when
-// nothing changed.
-function promptOpenings(msgs) {
+// promptOpenings adapts the messages of msgs (chat completions' messages,
+// Responses' input) as anthropicBody adapts a Messages request's: pi's
+// opening and Claude Code's fixed phrases in the system and developer
+// messages (the first of chat's as a system prompt, when prompt), pi's
+// summary and Claude Code's reminders in user messages, and client phrases
+// quoted in tool output (chat's tool messages, Responses'
+// function_call_output). String content or text parts change, nothing else:
+// false when nothing changed.
+function promptOpenings(msgs, prompt = false) {
   let changed = false
-  for (const m of Array.isArray(msgs) ? msgs : []) {
-    if (!m || typeof m !== "object") continue
-    const adapt = m.role === "system" || m.role === "developer" ? clientOpening : m.role === "user" ? piSummary : null
-    if (!adapt) continue
-    if (typeof m.content === "string") {
-      const adapted = adapt(m.content)
-      if (adapted !== m.content) (m.content = adapted), (changed = true)
-    } else if (Array.isArray(m.content)) {
-      for (const p of m.content) {
+  const list = Array.isArray(msgs) ? msgs : []
+  list.forEach((m, i) => {
+    if (!m || typeof m !== "object") return
+    let adapt, field = "content"
+    if (m.role === "system" || m.role === "developer") adapt = prompt && i === 0 && m.role === "system" ? promptText : systemMessageText
+    else if (m.role === "user") adapt = (t) => userText(piSummary(t))
+    else if (m.role === "tool") adapt = (t) => quotedToolText(t)
+    else if (m.type === "function_call_output") (adapt = (t) => quotedToolText(t)), (field = "output")
+    else return
+    const c = m[field]
+    if (typeof c === "string") {
+      const adapted = adapt(c)
+      if (adapted !== c) (m[field] = adapted), (changed = true)
+    } else if (Array.isArray(c)) {
+      for (const p of c) {
         if (!p || typeof p !== "object" || typeof p.text !== "string") continue
-        const adapted = adapt(p.text)
+        // a part is a block of its own: no joined reminders to look into
+        const adapted = m.role === "user" ? userBlockText(piSummary(p.text)) : adapt(p.text)
         if (adapted !== p.text) (p.text = adapted), (changed = true)
       }
     }
-  }
+  })
   return changed
 }
 
@@ -459,13 +470,13 @@ function droidBody(path, body) {
     const v = m.instructions
     if (v !== undefined && v !== null && typeof v !== "string") return body // not something droid sends
     const opened = promptOpenings(m.input)
-    const ins = clientOpening(v ?? "")
+    const ins = promptText(v ?? "")
     if (!ins.startsWith(DROID_LINE)) m.instructions = ins.trim() === "" ? DROID_LINE : DROID_LINE + "\n" + ins
     else if (ins !== v || opened) m.instructions = ins
     else return body
   } else if (path.endsWith("/chat/completions")) {
     if (!Array.isArray(m.messages)) return body
-    const opened = promptOpenings(m.messages)
+    const opened = promptOpenings(m.messages, true)
     if (!droidChat(m.messages) && !opened) return body
   } else return body
   return JSON.stringify(m)
@@ -1191,6 +1202,62 @@ function quotedToolText(text, prefix = QUOTED_TOOL_PREFIX) {
   return prefix + encoded
 }
 
+// The adapters below are shared by both of Factory's routes. Claude Code's
+// request reaches /api/llm/a as Messages, but a model Factory serves on
+// /api/llm/o (GLM, Kimi and other chat models) gets it translated by magpie
+// into chat completions or Responses, carrying the same fixed phrases.
+// Factory refuses them there too (Echoo on magpie's Discord: GLM-5.3-Flash,
+// Claude Code 403 while Codex worked on the same account).
+
+// claudeIdentity opens text with droid's line in place of Claude Code's
+// fixed first line, when text is that line alone or opens with it.
+function claudeIdentity(text) {
+  const identity = [...CLAUDE_IDENTITIES].find((line) => text === line || text.startsWith(line + "\n"))
+  return identity ? DROID_LINE + text.slice(identity.length) : text
+}
+
+// promptText adapts a system prompt's text.
+function promptText(text) {
+  return clientOpening(systemModelLine(claudeIdentity(text)))
+}
+
+// systemMessageText adapts a system message's text after the prompt.
+function systemMessageText(text) {
+  return bareSkills(clientOpening(systemContext(text)))
+}
+
+// userBlockText adapts one text block of a user turn.
+function userBlockText(text) {
+  const compacted = compactContext(text)
+  if (compacted !== text) return compacted
+  if (text.startsWith(INSTRUCTIONS_REMINDER) && text.includes(GLOBAL_INSTRUCTIONS)) return text.replaceAll(GLOBAL_INSTRUCTIONS, "(global instructions)")
+  // a system message folded into the user's turn on its way here
+  if (HOOK_OUTPUT.test(text) || SYSTEM_ENV_CONTEXT.test(text)) return systemContext(text)
+  if (ENV_REMINDER.test(text)) {
+    return text.replace("# Environment", "# Runtime context")
+      .replace("You have been invoked in the following environment:", "The session environment is:")
+  }
+  if (MODEL_REMINDER.test(text)) {
+    return text.replace("You are powered by the model named", "Current model name:")
+      .replace("You are powered by the model", "Current model:")
+      .replace("The exact model ID is", "Model ID:")
+      .replace("Assistant knowledge cutoff is", "Model knowledge cutoff:")
+  }
+  if (SKILL_REMINDER.test(text)) return text.replace("\n" + CONFIG_SKILL_METADATA, "\n" + CONFIG_SKILL_COMPAT)
+  return text
+}
+
+// A chat completions user message is one string: magpie joins a Messages
+// turn's text blocks with nothing between them, so a reminder block and the
+// user's words arrive as one text. Adapted whole first, then each complete
+// reminder in it as the block it was; the rest stays as it is.
+const REMINDER_BLOCK = /<system-reminder>\n[\s\S]*?\n<\/system-reminder>/g
+function userText(text) {
+  const adapted = userBlockText(text)
+  if (adapted !== text || !text.includes("<system-reminder>\n")) return adapted
+  return text.replace(REMINDER_BLOCK, (block) => userBlockText(block))
+}
+
 function anthropicBody(body) {
   let request
   try {
@@ -1226,9 +1293,7 @@ function anthropicBody(body) {
     if (block?.type === "text") {
       // The gateway may join the identity and instructions into one block.
       // Only the complete fixed first line is metadata; keep the rest.
-      const identity = [...CLAUDE_IDENTITIES].find((line) => block.text === line || block.text.startsWith(line + "\n"))
-      const text = identity ? DROID_LINE + block.text.slice(identity.length) : block.text
-      const adapted = clientOpening(systemModelLine(text))
+      const adapted = promptText(block.text)
       if (adapted !== block.text) {
         block.text = adapted
         changed = true
@@ -1256,7 +1321,7 @@ function anthropicBody(body) {
 
   for (const message of request.messages) {
     if (message?.role === "system" && typeof message.content === "string") {
-      const adapted = bareSkills(clientOpening(systemContext(message.content)))
+      const adapted = systemMessageText(message.content)
       if (adapted !== message.content) {
         message.content = adapted
         changed = true
@@ -1269,7 +1334,7 @@ function anthropicBody(body) {
     if (message?.role === "system" && Array.isArray(message.content)) {
       for (const block of message.content) {
         if (block?.type !== "text" || typeof block.text !== "string") continue
-        const adapted = bareSkills(clientOpening(systemContext(block.text)))
+        const adapted = systemMessageText(block.text)
         if (adapted !== block.text) {
           block.text = adapted
           changed = true
@@ -1308,36 +1373,10 @@ function anthropicBody(body) {
         continue
       }
       if (block?.type !== "text" || typeof block.text !== "string") continue
-      const compacted = compactContext(block.text)
-      if (compacted !== block.text) {
-        block.text = compacted
+      const adapted = userBlockText(block.text)
+      if (adapted !== block.text) {
+        block.text = adapted
         changed = true
-      } else if (block.text.startsWith(INSTRUCTIONS_REMINDER) && block.text.includes(GLOBAL_INSTRUCTIONS)) {
-        block.text = block.text.replaceAll(GLOBAL_INSTRUCTIONS, "(global instructions)")
-        changed = true
-      } else if (HOOK_OUTPUT.test(block.text) || SYSTEM_ENV_CONTEXT.test(block.text)) {
-        // a system message folded into the user's turn on its way here
-        const adapted = systemContext(block.text)
-        if (adapted !== block.text) {
-          block.text = adapted
-          changed = true
-        }
-      } else if (ENV_REMINDER.test(block.text)) {
-        block.text = block.text.replace("# Environment", "# Runtime context")
-          .replace("You have been invoked in the following environment:", "The session environment is:")
-        changed = true
-      } else if (MODEL_REMINDER.test(block.text)) {
-        block.text = block.text.replace("You are powered by the model named", "Current model name:")
-          .replace("You are powered by the model", "Current model:")
-          .replace("The exact model ID is", "Model ID:")
-          .replace("Assistant knowledge cutoff is", "Model knowledge cutoff:")
-        changed = true
-      } else if (SKILL_REMINDER.test(block.text)) {
-        const adapted = block.text.replace("\n" + CONFIG_SKILL_METADATA, "\n" + CONFIG_SKILL_COMPAT)
-        if (adapted !== block.text) {
-          block.text = adapted
-          changed = true
-        }
       }
     }
   }
