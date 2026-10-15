@@ -1209,6 +1209,24 @@ function enterpriseUsageOf(u) {
   return w
 }
 
+// spareFree has the credits windows not count the models that cost none
+// (notModels): a model at x0.00 draws no credits, and with the credits
+// used up WorkBuddy still serves it (deepseek-v4.1-flash at 560 / 560,
+// magpie-community/plugins#138, hheei). Counted, the window at 100% put
+// the account last, and behind every other, for its free models too. A
+// model free only some hours (a night promotion) is not free here, as in
+// the list (priceOf). A list that can't be read leaves the windows as they
+// are: every model counted, as before.
+async function spareFree(site, a, windows) {
+  if (!windows.length) return windows
+  let free = []
+  try {
+    free = (await liveModels(site, a)).filter((m) => m.free).map((m) => m.id)
+  } catch {}
+  if (free.length) for (const w of windows) w.notModels = free
+  return windows
+}
+
 // The packages' codes, as WorkBuddy's own client lists them when it asks
 // for each package's credits (its COMMODITY_CODES): the API refuses a
 // detail list without them (10001 "PackageCodes required").
@@ -1577,7 +1595,7 @@ function makePlugin(site) {
             try {
               ent = enterpriseUsageOf(await meter(site, a, "/billing/meter/get-enterprise-user-usage"))
             } catch {}
-            if (ent) return { plan: auth.plan || "Enterprise", windows: [ent], signIn: "kept" }
+            if (ent) return { plan: auth.plan || "Enterprise", windows: await spareFree(site, a, [ent]), signIn: "kept" }
           }
           // when the credits left run out, for routing to spend them first;
           // a list that can't be read leaves it unknown, the card stands
@@ -1587,6 +1605,7 @@ function makePlugin(site) {
               Object.assign(credits, runsOutOf(sum, await packagesOf(site, a)) ?? {})
             } catch {}
           }
+          await spareFree(site, a, out.windows)
           return { ...out, signIn: "kept" }
         } catch (e) {
           return { error: e?.message ?? String(e), signIn: "kept" }

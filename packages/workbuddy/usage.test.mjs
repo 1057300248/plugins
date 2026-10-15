@@ -378,3 +378,47 @@ test("enterpriseUsageOf: no limit, no window; times it can't read are left out",
   expect(_internal.enterpriseUsageOf({ credit: "12.5", limitNum: "100", cycleResetTime: "soon" }))
     .toEqual({ name: "Credits", used: 12.5, display: "12.5 / 100", amount: 12.5, limit: 100, unit: "credits" })
 })
+
+// A model at x0.00 draws no credits, and with the credits used up
+// WorkBuddy still serves it: hheei's account at 560 / 560 was served
+// deepseek-v4.1-flash (magpie-community/plugins#138). The credits window
+// leaves those models out (notModels), so magpie doesn't put the account
+// last for them. One free only at night (a daily promotion) still counts.
+const FREE_CFG = () => ok({
+  agents: [{ name: "cli", models: ["deepseek-v4.1-flash", "deepseek-v4.1-flash-sg", "gpt-5.5", "hy4"] }],
+  models: [
+    { id: "deepseek-v4.1-flash", name: "Deepseek-V4.1-Flash", credits: "x0.00" },
+    { id: "deepseek-v4.1-flash-sg", name: "Deepseek-V4.1-Flash", credits: "x0.03" },
+    { id: "gpt-5.5", credits: "x1.00" },
+    { id: "hy4", credits: "x0.50" },
+  ],
+  modelPromotions: [{ kind: "discount", modelIds: ["hy4"], discount: { discountedCredits: "0.00x" }, schedule: { daily: [{ start: "23:00", end: "08:00" }] } }],
+})
+const SPENT = { IsPaidUser: false, Packages: [{ CycleTotalCapacity: "560", CycleUsedCapacity: "560" }] }
+
+test("credits used up don't count the free models (plugins#138, hheei)", async () => {
+  for (const plugin of [WorkBuddyAuthPlugin, WorkBuddyAIAuthPlugin]) {
+    serve({ "/billing/meter/get-user-resource-summary": () => ok(SPENT), "/v3/config": FREE_CFG })
+    const auth = { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u", domain: "" }
+    expect(await usageOf(plugin, auth)).toEqual({ signIn: "kept", plan: "Free", windows: [{
+      name: "Credits", used: 100, display: "560 / 560", amount: 560, limit: 560, unit: "credits", notModels: ["deepseek-v4.1-flash"] }] })
+  }
+})
+
+test("an enterprise account's credits don't count the free models either", async () => {
+  serve({
+    "/billing/meter/get-user-resource-summary": () => new Response(ENT_SUMMARY),
+    "/billing/meter/get-enterprise-user-usage": () => new Response(ENT_USAGE),
+    "/v3/config": FREE_CFG,
+  })
+  const auth = { type: "oauth", access: "ent-access", refresh: "r", expires: later(), uid: "u9", domain: "www.workbuddy.cn", enterpriseId: "ent-1" }
+  expect((await usageOf(WorkBuddyAuthPlugin, auth)).windows[0].notModels).toEqual(["deepseek-v4.1-flash"])
+})
+
+test("a model list that can't be read leaves the credits counting every model", async () => {
+  serve({ "/billing/meter/get-user-resource-summary": () => ok(SPENT), "/v3/config": () => new Response("busy", { status: 503 }) })
+  const auth = { type: "oauth", access: "a", refresh: "r", expires: later(), uid: "u", domain: "" }
+  const w = (await usageOf(WorkBuddyAuthPlugin, auth)).windows[0]
+  expect(w.used).toBe(100)
+  expect(w.notModels).toBeUndefined()
+})
