@@ -60,8 +60,14 @@ magpie calls the plugin's `provider.models`, which reads `amr-link`'s live
 `/v1/models` at that account's key on every listing, so what a signed-in
 account is offered is what its plan entitles it to right now. Limits, input
 modalities and the vendor's own cost words (`rate`, e.g. `x0.5` for "low")
-come from that same catalog; a model whose vendor tier is `advanced` is
-marked as one that reasons.
+come from that same catalog.
+
+Reasoning levels are not in the catalog, so `models.mjs` records the ones
+measured against `amr-link` (#137): every model took `reasoning_effort`
+`low` and `high`, and all but GPT-6 Luna thought at them, the ones the
+catalog calls `standard` too. Those models reason at `low` and `high`;
+GPT-6 Luna has no levels. A model the seed doesn't know reasons when its
+vendor tier is `advanced`, with no levels until it is measured.
 
 `models.mjs` is the seed the provider has *before* anyone signs in. Refresh
 it from the live catalog with:
@@ -71,8 +77,9 @@ magpie plugin login opendesign            # once, so the key is on hand
 bun refresh-models.mjs                    # or OPENDESIGN_KEY=sk-amr-… bun …
 ```
 
-The script keeps the names already chosen — the catalog carries ids only —
-and reads nothing else: no secret is written to the file or printed.
+The script keeps the names and measured levels already there — the catalog
+carries neither — and reads nothing else: no secret is written to the file or
+printed.
 
 Requests go to the **Responses** API (`@ai-sdk/openai` at
 `https://amr-link.open-design.ai/v1`), which is what an Open Design API key

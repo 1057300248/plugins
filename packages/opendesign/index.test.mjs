@@ -135,32 +135,88 @@ const CATALOG = {
   ],
 }
 
+// what magpie's plugin host reads off a model provider.models gives back
+// (internal/plugin/host.js, providers()): its thinking from
+// capabilities.reasoning, its levels from the variants' names
+const asMagpieReads = (m) => ({
+  reasoning: !!m.capabilities?.reasoning,
+  variants: Object.keys(m.variants ?? {}),
+  image: !!m.capabilities?.input?.image,
+})
+
 test("the account's list is the vendor's own, live", () => {
   const models = I.modelsOf(CATALOG)
   expect(Object.keys(models)).toEqual(["gpt-6-luna", "deepseek-v4-pro", "brand-new-9"])
   expect(models["gpt-6-luna"]).toEqual({
     id: "gpt-6-luna",
     name: "GPT-6 Luna",
-    reasoning: false,
-    rate: "x0.5",
-    tool_call: true,
-    attachment: true,
+    api: { id: "gpt-6-luna", url: "https://amr-link.open-design.ai/v1", npm: "@ai-sdk/openai" },
+    status: "active",
+    headers: {},
+    options: {},
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
     limit: { context: 1050000, output: 304000 },
-    modalities: { input: ["text", "image", "file"], output: ["text"] },
+    capabilities: {
+      temperature: true,
+      reasoning: false,
+      attachment: true,
+      toolcall: true,
+      input: { text: true, image: true, audio: false, video: false, pdf: false },
+      output: { text: true, image: false, audio: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    release_date: "",
+    variants: {},
+    rate: "x0.5",
   })
-  expect(models["deepseek-v4-pro"]).toMatchObject({ reasoning: true, rate: "x2", limit: { context: 1048000, output: 232000 } })
+  expect(models["deepseek-v4-pro"]).toMatchObject({ rate: "x2", limit: { context: 1048000, output: 232000 } })
   // a model the seed doesn't know is named by its id, and a catalog entry
   // without limits still gets a workable entry
-  expect(models["brand-new-9"]).toEqual({
+  expect(models["brand-new-9"]).toMatchObject({
     id: "brand-new-9",
     name: "brand-new-9",
-    attachment: true,
-    tool_call: true,
-    reasoning: true,
     rate: "x1",
     limit: { context: 200000, output: 32000 },
-    modalities: { input: ["text", "image"], output: ["text"] },
   })
+})
+
+// #137 (sryimnoob123): amr-link took reasoning_effort low and high on all 11
+// models, and every one but GPT-6 Luna thought at it, "standard" or not
+test("a signed-in account's models reason at the levels amr-link took (#137)", () => {
+  const models = I.modelsOf(CATALOG)
+  expect(asMagpieReads(models["deepseek-v4-pro"])).toEqual({ reasoning: true, variants: ["low", "high"], image: false })
+  expect(models["deepseek-v4-pro"].variants).toEqual({ low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } })
+  // took the level and never thought at it
+  expect(asMagpieReads(models["gpt-6-luna"])).toEqual({ reasoning: false, variants: [], image: true })
+  // "advanced" but never measured: it reasons, at no level said for it
+  expect(asMagpieReads(models["brand-new-9"])).toEqual({ reasoning: true, variants: [], image: true })
+  // the catalog calls these "standard"; they thought at both levels
+  const standard = I.modelsOf({
+    data: ["claude-haiku-5.5", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "mimo-v2.6-flash"].map((id) => ({ id, metadata: { capability: "standard" } })),
+  })
+  for (const m of Object.values(standard)) expect(asMagpieReads(m)).toMatchObject({ reasoning: true, variants: ["low", "high"] })
+})
+
+test("the seed's models carry the measured levels as the config's variants", async () => {
+  const hooks = await OpenDesignAuthPlugin({})
+  const cfg = {}
+  await hooks.config(cfg)
+  const models = cfg.provider.opendesign.models
+  const levels = Object.fromEntries(Object.entries(models).map(([id, m]) => [id, m.reasoning ? Object.keys(m.variants ?? {}) : null]))
+  expect(levels).toEqual({
+    "claude-haiku-5.5": ["low", "high"],
+    "deepseek-v4-flash": ["low", "high"],
+    "deepseek-v4-flash-vision-exp": ["low", "high"],
+    "deepseek-v4-pro": ["low", "high"],
+    "deepseek-v4.1-flash": ["low", "high"],
+    "glm-5.3-flash": ["low", "high"],
+    "glm-5.3-flashx": ["low", "high"],
+    "gpt-6-luna": null,
+    "kimi-k2.7-code": ["low", "high"],
+    "mimo-v2.6-flash": ["low", "high"],
+    "mimo-v2.6-pro": ["low", "high"],
+  })
+  expect(models["claude-haiku-5.5"].variants.high).toEqual({ reasoningEffort: "high" })
 })
 
 test("an empty catalog is no models", () => {
@@ -187,6 +243,7 @@ test("the plugin declares the provider and answers its methods", async () => {
     attachment: true,
     tool_call: true,
     reasoning: true,
+    variants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } },
     rate: "x0.5",
     limit: { context: 1048000, output: 232000 },
     modalities: { input: ["text", "image"], output: ["text"] },

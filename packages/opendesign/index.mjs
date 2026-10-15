@@ -233,11 +233,24 @@ function thePlan(summary, tier) {
   return "Design Plan " + t[0].toUpperCase() + t.slice(1)
 }
 
+// levelsOf is a model's reasoning levels: the ones models.mjs records as
+// measured against amr-link (#137), where the vendor's capability word
+// misleads both ways — "standard" models took reasoning_effort and thought
+// at it, and GPT-6 Luna took it and never thought. A model the seed doesn't
+// know has none until it is measured too.
+function levelsOf(m) {
+  return Array.isArray(m?.efforts) ? m.efforts.filter((e) => typeof e === "string" && e) : []
+}
+
 // modelOf turns one model's facts — models.mjs's, or amr-link's catalog
-// read again — into the model magpie shows.
+// read again — into the model magpie shows, as the provider's config has
+// it. A model reasons when it has levels, or else when the vendor calls it
+// "advanced". variants are its levels as @ai-sdk/openai options: magpie
+// shows a model's levels only from its variants, and only when it reasons.
 function modelOf(id, m) {
   const rate = COST[text(m?.cost)]
-  const thinking = THINKING[text(m?.capability)]
+  const levels = levelsOf(m)
+  const thinking = levels.length > 0 || (THINKING[text(m?.capability)] ?? !!m?.reasoning)
   const context = Number(m?.context)
   const output = Number(m?.output)
   const input = Array.isArray(m?.input) ? m.input.filter((x) => typeof x === "string" && x !== "text") : []
@@ -246,13 +259,49 @@ function modelOf(id, m) {
     name: text(m?.name) || id,
     attachment: true,
     tool_call: true,
-    reasoning: thinking ?? !!m?.reasoning,
+    reasoning: thinking,
+    ...(levels.length && { variants: Object.fromEntries(levels.map((e) => [e, { reasoningEffort: e }])) }),
     ...(rate && { rate }),
     limit: {
       context: Number.isFinite(context) && context > 0 ? context : 200_000,
       output: Number.isFinite(output) && output > 0 ? output : 32_000,
     },
     modalities: { input: ["text", ...input], output: ["text"] },
+  }
+}
+
+// KINDS are the kinds of input and output OpenCode's capabilities name.
+const KINDS = ["text", "image", "audio", "video", "pdf"]
+const kinds = (list) => Object.fromEntries(KINDS.map((k) => [k, list.includes(k)]))
+
+// servedOf is modelOf's model as provider.models hands it back: OpenCode's
+// model, not the config's. magpie reads a listed model's thinking from
+// capabilities.reasoning and its kinds from capabilities.input, so a config
+// shape there (reasoning: true beside no capabilities) listed every model a
+// signed-in account has as one that doesn't reason, with no levels (#137).
+function servedOf(id, m) {
+  const c = modelOf(id, m)
+  return {
+    id,
+    name: c.name,
+    api: { id, url: LINK, npm: NPM },
+    status: "active",
+    headers: {},
+    options: {},
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: c.limit,
+    capabilities: {
+      temperature: true,
+      reasoning: c.reasoning,
+      attachment: c.attachment,
+      toolcall: c.tool_call,
+      input: kinds(c.modalities.input),
+      output: kinds(c.modalities.output),
+      interleaved: false,
+    },
+    release_date: "",
+    variants: c.variants ?? {},
+    ...(c.rate && { rate: c.rate }),
   }
 }
 
@@ -277,14 +326,15 @@ function seed() {
 }
 
 // modelsOf() shapes amr-link's live catalog as magpie's models: the list an
-// account's plan entitles it to right now, in the seed's shape. A model the
-// seed knows keeps its name; the catalog carries ids only.
+// account's plan entitles it to right now, as provider.models gives them. A
+// model the seed knows keeps its name and its measured levels; the catalog
+// carries ids only.
 function modelsOf(catalog) {
   const out = {}
   for (const m of catalog?.data ?? []) {
     const id = text(m?.id)
     if (!id) continue
-    out[id] = modelOf(id, { ...facts(m), name: MODELS[id]?.name ?? id })
+    out[id] = servedOf(id, { ...facts(m), name: MODELS[id]?.name ?? id, efforts: MODELS[id]?.efforts })
   }
   return out
 }

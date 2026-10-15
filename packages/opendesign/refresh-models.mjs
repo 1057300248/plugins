@@ -57,7 +57,8 @@ if (!catalog.length) {
   process.exit(1)
 }
 
-// names already chosen are kept: the catalog has ids only
+// names already chosen are kept, and so are the measured reasoning levels:
+// the catalog has ids only, and says nothing of efforts
 let before = {}
 try {
   ;({ MODELS: before } = await import(pathToFileURL(TARGET).href))
@@ -80,6 +81,8 @@ for (const m of catalog) {
   if (extra.length) facts.push(`input: [${extra.map((x) => JSON.stringify(x)).join(", ")}]`)
   if (typeof meta.cost === "string") facts.push(`cost: ${JSON.stringify(meta.cost)}`)
   if (typeof meta.capability === "string") facts.push(`capability: ${JSON.stringify(meta.capability)}`)
+  const efforts = before[id]?.efforts
+  if (Array.isArray(efforts)) facts.push(`efforts: [${efforts.map((x) => JSON.stringify(x)).join(", ")}]`)
   const name = before[id]?.name ?? id
   lines.push(`  ${JSON.stringify(id)}: { name: ${JSON.stringify(name)}${facts.length ? ", " + facts.join(", ") : ""} },`)
 }
@@ -92,7 +95,9 @@ const header = `// The models an account is offered before anyone has signed in 
 //
 // name: what the model is called; context/output: its token limits; input:
 // the non-text modalities it takes; cost and capability: the vendor's own
-// words, which the plugin turns into magpie's rate and thinking flags.
+// words, which the plugin turns into magpie's rate and thinking flags;
+// efforts: the reasoning levels amr-link was seen to take and think at,
+// measured, not read (#137), so a refresh keeps them.
 
 export const MODELS = {
 ${lines.join("\n")}
