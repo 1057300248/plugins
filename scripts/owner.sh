@@ -21,8 +21,10 @@ dry=""
 repo=magpie-community/plugins
 reg=https://registry.npmjs.org/
 export npm_config_registry="$reg"
-# npm trust needs npm 11.5 or later
-npm11() { npx -y npm@11 "$@"; }
+# npm trust needs npm 11.5 or later. Its 2FA waits for the browser only
+# when it can ask on a terminal; without one it prints the link and fails
+# with EOTP, so npm reads from the terminal even when this script is piped.
+npm11() { npx -y npm@11 "$@" </dev/tty; }
 
 root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 git -C "$root" fetch -q https://github.com/$repo.git main
@@ -62,6 +64,10 @@ echo "$todo" | while read -r d name version state; do
   esac
 done
 [ -n "$dry" ] && exit 0
+if ! (: </dev/tty) 2>/dev/null; then
+  echo "npm's 2FA needs a terminal: run this in Terminal (not through a tool with no terminal, such as Claude Code's !)." >&2
+  exit 1
+fi
 
 if ! npm11 whoami >/dev/null 2>&1; then
   echo "Signing in to npm (in the browser)..."
