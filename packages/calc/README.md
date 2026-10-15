@@ -9,7 +9,7 @@ magpie plugin add @magpie-community/tools-calc
 magpie plugin            # lists its tools
 ```
 
-magpie serves the tools on its MCP server, `/mcp/magpie/tools`, to every agent it has connected. Each tool's name starts with the plugin's: `tools-calc_eval` when installed from npm, `calc_eval` from a folder (`magpie plugin add ./packages/calc`).
+magpie serves the tools on its MCP server, `/mcp/magpie/tools`, to every agent it has connected. Each tool's name starts with the plugin's short name, `calc`: `calc_eval`, `calc_convert` and `calc_date` (magpie v0.1.1260 or later; earlier versions named them `tools-calc_eval` when installed from npm).
 
 ## Tools
 
