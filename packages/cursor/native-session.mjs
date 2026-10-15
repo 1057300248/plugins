@@ -16,6 +16,9 @@ export const NATIVE_LIMITS = {
   argumentDepth: 64,
   outboundBytes: 16 << 20,
   outboundMessages: 256,
+  // How long a KV reply waits for room in the outbound queue (Cursor's own
+  // flow control taking the writes before it) before the Run fails.
+  writeWait: 30_000,
   perAccount: 8,
   perProcess: 32,
 }
@@ -270,6 +273,9 @@ class Segment {
     this.prefixDigest = historyDigest(chat.messages)
     this.events = []
     this.calls = []
+    // answered: the step's execs the bridge answered itself (a refusal, or
+    // the MCP tool list). Cursor's tool_requests_listed counts them too.
+    this.answered = 0
     this.content = ""
     this.reasoning = ""
     this.expected = null
@@ -530,6 +536,14 @@ class NativeSession {
     if (this.error || this.transportClosed) invalid("native transport is no longer writable", 410)
     this.transport.send(message)
   }
+  // reply answers one of Cursor's KV requests once the outbound queue has
+  // room. Cursor asks for every history blob at once, hundreds for a long
+  // conversation, faster than a slow link takes the replies: the decoder
+  // waits for the queue rather than failing the Run (#142).
+  async reply(message) {
+    await this.transport.room?.(message.length + 5)
+    this.send(message)
+  }
   execClose(id) {
     this.send(this.wire.pb().bytes(5, this.wire.pb().bytes(1, this.wire.pb().varint(1, id))).done())
   }
@@ -615,6 +629,15 @@ class NativeSession {
   missingCount() {
     this.fail({ status: 502, message: "Cursor did not declare its native tool batch", retentionIneligible: !this.resultSubmitted })
   }
+  // A call of the model's step the bridge answered itself: a refused tool (a
+  // name it doesn't serve, Cursor's own tools) or get_mcp_tools. Cursor's
+  // count is of every call the step made, so it counts toward the batch;
+  // never handed to the caller (#142).
+  answeredCall() {
+    if (this.terminal || this.state === "awaiting-results") return
+    this.segment.answered++
+    this.sealBatch()
+  }
   listed(count) {
     if (!Number.isSafeInteger(count) || count < 1) invalid("invalid native tool count", 502)
     if (this.segment.expected != null && this.segment.expected !== count) invalid("inconsistent native tool count", 502)
@@ -626,8 +649,18 @@ class NativeSession {
   sealBatch() {
     const segment = this.segment
     if (segment.expected == null) return
-    if (segment.calls.length > segment.expected) invalid("native tool batch exceeded its declared count", 502)
-    if (segment.calls.length !== segment.expected || segment.closed) return
+    const made = segment.calls.length + segment.answered
+    if (made > segment.expected) invalid("native tool batch exceeded its declared count", 502)
+    if (made !== segment.expected || segment.closed) return
+    if (!segment.calls.length) {
+      // Every call of the step was answered here: Cursor goes on with the
+      // turn by itself, and its next step lists a count of its own.
+      segment.expected = null
+      segment.answered = 0
+      clearTimeout(this.batchTimer)
+      this.batchTimer = null
+      return
+    }
     clearTimeout(this.batchTimer)
     this.batchTimer = null
     this.state = "awaiting-results"
@@ -793,6 +826,8 @@ class NativeSession {
             case 2: {
               const c = exec(m.data, this.chatTools, (b) => this.send(b), (id) => this.execClose(id), null, true)
               if (c) this.acceptCall(c)
+              // request_context is Cursor asking for the environment, not a call
+              else if (!nativeFields(m.data).some((e) => e.num === 10)) this.answeredCall()
               break
             }
             case 3:
@@ -806,7 +841,7 @@ class NativeSession {
                   const want = field(nativeFields(k.data), 1)?.data.toString("hex") ?? ""
                   const b = this.blobs.get(want)
                   const res = b ? pb().bytes(1, b) : pb().bytes(2, pb().str(1, "blob not found"))
-                  this.send(pb().bytes(3, pb().varint(1, id).bytes(2, res)).done())
+                  await this.reply(pb().bytes(3, pb().varint(1, id).bytes(2, res)).done())
                 } else if (k.num === 3) {
                   try {
                     const set = nativeFields(k.data)
@@ -815,7 +850,7 @@ class NativeSession {
                     this.send(pb().bytes(3, pb().varint(1, id).bytes(3, pb().bytes(1, pb().str(1, "native blob could not be retained")))).done())
                     throw e
                   }
-                  this.send(pb().bytes(3, pb().varint(1, id).bytes(3, Buffer.alloc(0))).done())
+                  await this.reply(pb().bytes(3, pb().varint(1, id).bytes(3, Buffer.alloc(0))).done())
                 }
               }
               break

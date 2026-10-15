@@ -557,8 +557,9 @@ test("native loader: streamed ordinary text/thinking arrives before the server p
 })
 
 
-for (const bound of ["bytes", "messages"]) test(`native loader HTTP/2: stalled writes bound queued parked KV ${bound}`, async () => {
+for (const bound of ["bytes", "messages"]) test(`native loader HTTP/2: KV replies stalled past writeWait at the queued ${bound} bound fail the Run`, async () => {
   NATIVE_LIMITS.outboundBytes = 4 << 20
+  NATIVE_LIMITS.writeWait = 100
   NATIVE_LIMITS.outboundMessages = bound === "messages" ? 4 : 256
   const a = await agent({ stateDelay: 10_000 })
   const connect = http2.connect

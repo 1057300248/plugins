@@ -1939,6 +1939,15 @@ function nativeTransport(req, close, fail, limits = NATIVE_LIMITS) {
   const outbound = { bytes: 0, messages: 0 }
   const queue = []
   let closed = false, flushing = false, rejectWrite
+  // waiters for room (KV replies), woken as writes complete. An eighth of
+  // each bound stays free for heartbeats and exec answers, which never wait.
+  const waiters = new Set()
+  const spare = (n) => Math.floor(n / 8)
+  const fits = (size) => outbound.messages === 0 || (outbound.messages + 1 + spare(limits.outboundMessages) <= limits.outboundMessages
+    && outbound.bytes + size + spare(limits.outboundBytes) <= limits.outboundBytes)
+  const wake = () => {
+    for (const w of waiters) if (closed || fits(w.size)) w.done()
+  }
   const flush = async () => {
     if (closed || flushing) return
     flushing = true
@@ -1975,7 +1984,7 @@ function nativeTransport(req, close, fail, limits = NATIVE_LIMITS) {
             check()
           } catch (e) { finish(e) }
         })
-        if (!closed) { outbound.bytes -= packet.length; outbound.messages-- }
+        if (!closed) { outbound.bytes -= packet.length; outbound.messages--; wake() }
       }
     } catch (e) {
       if (!closed) fail(e)
@@ -1993,12 +2002,35 @@ function nativeTransport(req, close, fail, limits = NATIVE_LIMITS) {
       queue.push(frame(message))
       void flush()
     },
+    // room resolves once a message of size fits the queue with the spare
+    // kept, and fails the Run when the queue doesn't drain for writeWait.
+    room(size) {
+      if (closed || fits(size)) return Promise.resolve()
+      return new Promise((resolve, reject) => {
+        const w = {
+          size,
+          done() {
+            waiters.delete(w)
+            clearTimeout(w.timer)
+            resolve()
+          },
+        }
+        w.timer = setTimeout(() => {
+          waiters.delete(w)
+          const which = outbound.bytes + size + spare(limits.outboundBytes) > limits.outboundBytes ? "bytes" : "messages"
+          reject(new NativeSessionError(503, `native outbound ${which} limit reached: the queue did not drain for ${Math.round(limits.writeWait / 1000)}s`))
+        }, limits.writeWait)
+        w.timer.unref?.()
+        waiters.add(w)
+      })
+    },
     close() {
       if (closed) return
       closed = true
       queue.length = 0
       outbound.bytes = 0
       outbound.messages = 0
+      wake()
       rejectWrite?.(new NativeSessionError(410, "native transport was cancelled"))
       close()
     },
@@ -2232,9 +2264,22 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
 // turn ends, or the model has made its tool calls.
 async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage, owedUsage }) {
   let calls = 0
+  // answered: the step's calls answered here (a refusal, the MCP tool
+  // list), which Cursor's count of the step's calls takes in too (#142)
+  let answered = 0
   // ended: Cursor said what the turn used
   let ended = false
   let listed = 0
+  // stepDone is whether every call the step listed has come. A step whose
+  // calls were all answered here goes on on Cursor's side, under a count of
+  // its own.
+  const stepDone = () => {
+    if (!listed || calls + answered < listed) return false
+    if (calls > 0) return true
+    listed = 0
+    answered = 0
+    return false
+  }
   let said = 0
   // wrote: the reply's text alone; a turn of thinking only says nothing
   let wrote = 0
@@ -2342,9 +2387,9 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
                     return
                   }
                   break
-                case 27: // how many tool calls the step makes, sent before them
+                case 27: // how many tool calls the step makes, sent before or after them
                   listed = pbNum(uf, 1)
-                  if (listed > 0 && calls >= listed) {
+                  if (stepDone()) {
                     yield await settled()
                     return
                   }
@@ -2360,8 +2405,8 @@ async function* decode(stream, { send, blobs, tools, estimate, close, stepUsage,
             if (call) {
               said += call.args.length
               yield { tool: { index: calls++, ...call } }
-            }
-            if (listed > 0 && calls >= listed) {
+            } else if (!fields(m.data).some((e) => e.num === 10)) answered++
+            if (stepDone()) {
               // every call made: the caller runs them
               yield await settled()
               return

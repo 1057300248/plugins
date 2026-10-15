@@ -95,7 +95,15 @@ uses the same session/cache key and first user message as `conversation_id`, so
 Task subagents sharing their parent's session can run independently. Retention
 waits at most 120 seconds for a result batch and 15 minutes for a Run's total
 lifetime. The pool holds at most 8 owners per account and 32 per process, with
-bounded history, blobs, arguments, and pending writes.
+bounded history, blobs, arguments, and pending writes. When pending writes
+reach their bound (a long history asks for its blobs at once, and a slow link
+drains them slowly), the Run waits for the link to drain, and fails only if it
+doesn't for 30 seconds.
+
+Cursor's count of a step's tool calls includes calls the plugin answers itself:
+a tool the request doesn't have is refused to the model, and Cursor's own
+`get_mcp_tools` is answered with the request's tools. The step's calls are the
+rest.
 
 These are retention limits. A missing, expired, restarted, busy, incompatible,
 or full owner uses the original history reconstruction and stateless decoder

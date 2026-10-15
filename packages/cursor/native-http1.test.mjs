@@ -200,8 +200,9 @@ test("native HTTP/1: two external roundtrips keep one RunSSE and serialize resul
   expect(seen.results.map((r) => r.id)).toEqual([7, 8])
 })
 
-for (const bound of ["bytes", "messages"]) test(`native loader HTTP/1: stalled parked KV replies hit the outbound ${bound} bound and abort all transport work`, async () => {
+for (const bound of ["bytes", "messages"]) test(`native loader HTTP/1: parked KV replies stalled past writeWait at the outbound ${bound} bound abort all transport work`, async () => {
   NATIVE_LIMITS.outboundBytes = 4 << 20
+  NATIVE_LIMITS.writeWait = 100
   NATIVE_LIMITS.outboundMessages = bound === "messages" ? 4 : 256
   const a = await fixture({ stallKv: true })
   const chat = initial()
