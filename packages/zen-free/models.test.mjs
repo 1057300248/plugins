@@ -60,10 +60,24 @@ test("endpoint documentation overrides inherited SDK and excludes SystemOne", as
   assert.equal(models["decision-free"], undefined);
 });
 
-test("unknown models require a known protocol rather than a guessed chat endpoint", async () => {
+// A model Zen lists as -free before the catalog or the docs describe it is
+// asked as the provider's own package asks (chat), as OpenCode asks a model
+// with no package of its own (yetone/magpie#2385); anything else unknown
+// still needs their word.
+test("an unknown -free model is offered on the provider's package; another unknown model is not", async () => {
   const { buildModels } = await subject;
   assert.equal(typeof buildModels, "function", "model discovery must be implemented");
-  assert.deepEqual(Object.keys(buildModels(["new-free", "unknown-paid"], {}, {}, baseURL)), []);
+  assert.deepEqual(
+    Object.keys(buildModels(["new-free", "unknown-paid", "freebie", "free-model"], {}, {}, baseURL)),
+    ["new-free"],
+  );
+  assert.equal(buildModels(["new-free"], {}, {}, baseURL)["new-free"].api.npm, "@ai-sdk/openai-compatible");
+  assert.equal(
+    buildModels(["new-free"], { npm: "@ai-sdk/openai" }, {}, baseURL)["new-free"].api.npm,
+    "@ai-sdk/openai",
+  );
+  // the docs saying SystemOne keep it out
+  assert.deepEqual(Object.keys(buildModels(["new-free"], {}, { "new-free": "systemone" }, baseURL)), []);
   const models = buildModels(["new-free"], {}, { "new-free": "chat" }, baseURL);
   assert.equal(models["new-free"].api.url, baseURL);
   assert.equal(models["new-free"].cost.input, 0);

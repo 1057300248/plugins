@@ -41,13 +41,31 @@ export function isFree(id, model = {}) {
   );
 }
 
+// A model Zen lists whose id says it is free (Zen names them "-free"), and
+// that neither the catalog nor the docs describe yet: Zen made it free
+// after they were last written (deepseek-v4.1-flash-free, yetone/magpie#2385),
+// or they couldn't be read. It is asked as OpenCode asks a model with no
+// package of its own, through the provider's (openai-compatible, chat), so
+// a new free model is offered the hour Zen lists it, not when the catalog
+// or this plugin catch up. A paid or zero-cost id the id doesn't call free
+// still needs the catalog's word.
+function listedFree(id) {
+  return /-free$/.test(id);
+}
+
 export function buildModels(ids, provider, protocols, baseURL) {
   const result = {};
   for (const id of ids) {
     if (typeof id !== "string" || !id || id === "__proto__") continue;
     const raw = provider.models?.[id];
     const model = raw ?? {};
-    const protocol = protocols[id] ?? (raw && sdkProtocol(model.provider?.npm ?? provider.npm));
+    const protocol =
+      protocols[id] ??
+      (raw
+        ? sdkProtocol(model.provider?.npm ?? provider.npm)
+        : listedFree(id)
+          ? (sdkProtocol(provider.npm) ?? "chat")
+          : undefined);
     if (!isFree(id, model) || !Object.hasOwn(SDK, protocol)) continue;
     const input = model.modalities?.input ?? ["text"];
     const output = model.modalities?.output ?? ["text"];

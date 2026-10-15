@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { protocols, declaredTools, toolReply } from "./tool-fixtures.mjs";
 
@@ -18,7 +19,10 @@ async function fixture(t, input = {}) {
       state.onDiscovery?.();
       return;
     }
-    if (req.url === "/v1/models") {
+    if (req.url === "/v1/models" && state.listing) {
+      res.writeHead(state.modelsStatus, { "content-type": "application/json" });
+      res.end(state.listing);
+    } else if (req.url === "/v1/models") {
       res.writeHead(state.modelsStatus, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
@@ -304,7 +308,9 @@ test("partial catalog failure retains previously verified models rather than dro
   state.docsStatus = 503;
   const fallback = await plugin.provider.models({ models }, { auth: await publicAuth() });
   assert.deepEqual(Object.keys(fallback).sort(), ["chat-free", "messages-free", "responses-free"]);
-  assert.equal(fallback[Symbol.for("magpie.fellBack")], true);
+  // Zen's own list was read: not fallen back, so magpie takes this list
+  // and not the last one read in full (yetone/magpie#2385)
+  assert.equal(fallback[Symbol.for("magpie.fellBack")], undefined);
 });
 
 // The reporter of #2305 (yetone/magpie) saw only the three models the
@@ -322,7 +328,61 @@ test("listed free models are offered when the catalog and the docs can't be read
   assert.equal(models["step-5-preview-free"].api.npm, "@ai-sdk/openai-compatible");
   assert.equal(models["step-5-preview-free"].name, "Step 5 Preview Free");
   assert.equal(models["step-5-preview-free"].limit.context, 1000000);
-  assert.equal(models[Symbol.for("magpie.fellBack")], true);
+  assert.equal(models[Symbol.for("magpie.fellBack")], undefined);
+});
+
+// yetone/magpie#2385: Zen made deepseek-v4.1-flash-free free, and it was
+// never offered. Zen's /models as the public key read it on 2026-10-15,
+// byte for byte. Neither the plugin's snapshot nor an unreachable catalog
+// or docs describe it, and the list it was in was said as fallen back,
+// which magpie answers by keeping the last list read in full.
+const zenListing = readFileSync(
+  new URL("./fixtures/zen-models-2026-10-15.json", import.meta.url),
+  "utf8",
+);
+const zenFree = [
+  "big-pickle",
+  "cat-jam-free",
+  "deepseek-v4.1-flash-free",
+  "longcat-2.5-preview-free",
+  "mimo-v2.6-flash-free",
+  "muse-spark-1.2-contributor-free",
+  "muse-spark-1.3-contributor-free",
+  "nemotron-3.5-lightning-free",
+  "space-bunny-free",
+  "step-5-preview-free",
+];
+
+test("a free model Zen lists that the catalog and the docs don't describe is offered, on chat (#2385)", async (t) => {
+  const { plugin, state } = await fixture(t);
+  state.listing = zenListing;
+  state.catalogStatus = 503;
+  state.docsStatus = 404;
+  const models = await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  assert.deepEqual(Object.keys(models).sort(), zenFree);
+  assert.equal(models["deepseek-v4.1-flash-free"].api.npm, "@ai-sdk/openai-compatible");
+  assert.equal(models["deepseek-v4.1-flash-free"].free, true);
+  assert.equal(models["muse-spark-1.3-contributor-free"].api.npm, "@ai-sdk/openai");
+  assert.equal(models[Symbol.for("magpie.fellBack")], undefined);
+  // a request for it goes to Zen, at chat completions
+  const options = await plugin.auth.loader(publicAuth);
+  const response = await options.fetch(`${options.baseURL}/chat/completions`, {
+    method: "POST",
+    body: JSON.stringify({ model: "deepseek-v4.1-flash-free", messages: [], stream: true }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(state.calls.at(-1).url, "/v1/chat/completions");
+  assert.equal(state.calls.at(-1).body.model, "deepseek-v4.1-flash-free");
+});
+
+test("a free model Zen lists before the catalog has it is offered with the catalog read (#2385)", async (t) => {
+  const { plugin, state } = await fixture(t);
+  state.listing = zenListing;
+  const models = await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  assert.equal(models["deepseek-v4.1-flash-free"].api.npm, "@ai-sdk/openai-compatible");
+  // the fixture's catalog prices "paid" and names nothing of Zen's: no
+  // paid model Zen lists is offered for being unknown
+  for (const id of Object.keys(models)) assert.ok(zenFree.includes(id), id);
 });
 
 test("forces upstream streaming, preserves existing tools and returns the SSE body unbuffered", async (t) => {
