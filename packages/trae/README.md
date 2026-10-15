@@ -288,10 +288,29 @@ answered it 9074 even with the client's headers.
   `checked_in`, `credits`.
 - **Claim:** `POST api.trae.cn/trae/api/v2/ug/checkin_credits/claim`,
   the same, only while it is on and today's isn't in.
+- **The device, when Trae CN's own client is here (0.2.14):** the
+  account this machine's Trae CN desktop client is signed in as checks in
+  on the client's own device, the one Trae's device service registered:
+  `x-device-id` is the id in the client's
+  `globalStorage/storage.json` key `iCubeAuthInfo://icube-dc:<id>`,
+  `x-device-type` and `x-os-version` are this machine's, and no
+  `x-device-brand` is sent. The account is matched by the `userId` in the
+  client's sign-in (`iCubeAuthInfo://icube.cloudide`, plain JSON or the
+  client's fixed codec, as dingminhua/dsh-connect-trae reads it). The file
+  is only read: nothing in it is written, and the client's token is never
+  used. On one account the client's claim went through while the
+  plugin's, on its own device, got 9074 (yetone/magpie#808, #1920); that
+  this header is what changes it hasn't been tried on a real account
+  yet. Every other account keeps its own device, and a file that can't be
+  read or made out, or holds no single device, changes nothing. Files:
+  macOS `~/Library/Application Support/Trae CN/…`, Windows
+  `%APPDATA%\Trae CN\…` (or `trae-cn`), Linux `~/.config/trae-cn/…`
+  (or `Trae CN`; not seen on a real Linux install).
 - **What comes back:** Trae's answer as it is. A 401 or code 1001 marks
   the account for a new sign-in. Code 9095 means this device has checked
-  in today; nothing sends another device id to get round it, nor to get
-  round a 9074.
+  in today. No device id is ever made up, changed or rotated to get round
+  a 9095 or a 9074, and no account is given a device that isn't its
+  own client's.
 
 Only `api.trae.cn`'s `/trae/api/` pages are sent this way; any other URL
 that isn't a chat request is still refused (400). Needs 0.1.4 or later.
