@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   PROVIDER,
   SDK,
+  bootstrapProtocols,
   bootstrapProvider,
   buildModels,
   configModels,
@@ -17,8 +18,10 @@ import { guardToolResponse } from "./tool-response.mjs";
 const DEFAULT_BASE = "https://opencode.ai/inference/v1";
 const LEGACY_BASE = "https://opencode.ai/zen/v1";
 const CATALOG = "https://models.opencode.ai/api.json";
+// OpenCode's table of what each model is asked at; packages/web's zen.mdx,
+// read before, was removed on 2026-10-12 (anomalyco/opencode#54761)
 const DOCS =
-  "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/zen.mdx";
+  "https://raw.githubusercontent.com/anomalyco/opencode/dev/services/www/src/docs/content/console/models.mdx";
 const PATHS = { chat: "/chat/completions", responses: "/responses", anthropic: "/messages" };
 const CORE_TOOLS = ["bash", "edit", "glob", "grep", "read"];
 // The parameter each stand-in takes, OpenCode's own first one: Zen's free
@@ -181,9 +184,14 @@ async function server(_input, options = {}) {
   const baseURL = httpURL(options.baseURL ?? DEFAULT_BASE);
   const catalogURL = httpURL(options.catalogURL ?? CATALOG);
   const docsURL = httpURL(options.docsURL ?? DOCS);
-  let known = buildModels(Object.keys(bootstrapProvider.models), bootstrapProvider, {}, baseURL);
+  let known = buildModels(
+    Object.keys(bootstrapProvider.models),
+    bootstrapProvider,
+    bootstrapProtocols,
+    baseURL,
+  );
   let metadata = bootstrapProvider;
-  let protocols = {};
+  let protocols = { ...bootstrapProtocols };
   let listed = false;
   let listedAt = 0;
 
@@ -202,7 +210,7 @@ async function server(_input, options = {}) {
       partial = true;
     }
     if (docs.status === "fulfilled" && Object.keys(parseProtocolDocs(docs.value)).length) {
-      protocols = parseProtocolDocs(docs.value);
+      protocols = { ...bootstrapProtocols, ...parseProtocolDocs(docs.value) };
     } else {
       partial = true;
     }

@@ -307,6 +307,24 @@ test("partial catalog failure retains previously verified models rather than dro
   assert.equal(fallback[Symbol.for("magpie.fellBack")], true);
 });
 
+// The reporter of #2305 (yetone/magpie) saw only the three models the
+// plugin knew offline: the catalog and the docs out of reach dropped every
+// listed free model they didn't name. A listed free model now takes its
+// endpoint from the snapshot of OpenCode's console docs; Jev (SystemOne)
+// and a paid model stay out, and a model not listed isn't offered.
+test("listed free models are offered when the catalog and the docs can't be read", async (t) => {
+  const { plugin, state } = await fixture(t);
+  state.catalogStatus = 503;
+  state.docsStatus = 404;
+  state.ids = ["big-pickle", "step-5-preview-free", "cat-jam-free", "jev-1.13-free", "paid"];
+  const models = await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  assert.deepEqual(Object.keys(models).sort(), ["big-pickle", "cat-jam-free", "step-5-preview-free"]);
+  assert.equal(models["step-5-preview-free"].api.npm, "@ai-sdk/openai-compatible");
+  assert.equal(models["step-5-preview-free"].name, "Step 5 Preview Free");
+  assert.equal(models["step-5-preview-free"].limit.context, 1000000);
+  assert.equal(models[Symbol.for("magpie.fellBack")], true);
+});
+
 test("forces upstream streaming, preserves existing tools and returns the SSE body unbuffered", async (t) => {
   const { plugin, state, origin } = await fixture(t);
   await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
