@@ -1136,17 +1136,67 @@ const STATUS_TEXT = {
 }
 const statusText = (n) => STATUS_TEXT[n] || `HTTP ${n}`
 
-// meter asks the billing API as magpie's built-in did, its errors said
-// the same: WorkBuddy's message, else its code, else the HTTP status.
-async function meter(site, a, path, body = {}) {
-  const res = await fetch(site.endpoint + path, {
+// meterAsked is the billing API's reply to path, asked with a's sign-in.
+function meterAsked(site, a, path, body = {}, signal = AbortSignal.timeout(20000)) {
+  return fetch(site.endpoint + path, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": "WorkBuddy/" + UA_VERSION,
       Authorization: "Bearer " + a.access, "X-User-Id": a.uid ?? "", "X-Domain": domainOf(site, a), "X-Product": "SaaS",
       "X-IDE-Type": "WorkBuddy", ...enterpriseHeaders(a) },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20000),
+    signal,
   })
+}
+
+// EDGE_READS is how much of a request WorkBuddy's front door (APISIX, on
+// both sites) reads before it answers a sign-in it refuses. A refused
+// request with a longer body gets no answer at all: the connection is
+// reset, and the chat fails as "ECONNRESET: The socket connection was
+// closed unexpectedly", which says nothing of the sign-in (wyp on Discord,
+// 2026-10-15: a Claude Code session past 2 MiB failed on every turn).
+// Measured on 2026-10-15 on www.workbuddy.ai and copilot.tencent.com: a
+// body of 2097152 bytes with a refused token got 401, one of 2097153 a
+// reset; with an accepted token 20 MB went through.
+const EDGE_READS = 2 * 1024 * 1024
+
+const byteLength = (b) =>
+  typeof b === "string" ? Buffer.byteLength(b) : b instanceof ArrayBuffer || ArrayBuffer.isView(b) ? b.byteLength : 0
+
+// unanswered is what a chat whose fetch failed with err comes to: a chat
+// past EDGE_READS that the connection was reset on is asked about at the
+// billing API, which answers a refused sign-in with its 401 whatever the
+// size. A 401 there is the chat's own answer, said as one; anything else
+// leaves err as it was, as does a smaller chat, which the front door
+// answers itself. The chat isn't sent again.
+async function unanswered(site, a, body, err, signal) {
+  if (signal?.aborted || err?.name === "AbortError" || err?.name === "TimeoutError") throw err
+  const size = byteLength(body)
+  if (size <= EDGE_READS) throw err
+  let status = 0
+  try {
+    const res = await meterAsked(site, a, "/billing/meter/get-user-resource-summary", {}, AbortSignal.timeout(20000))
+    status = res.status
+    await res.body?.cancel()
+  } catch {
+    throw err
+  }
+  if (status !== 401) throw err
+  const mb = (size / (1024 * 1024)).toFixed(1)
+  const message =
+    `${site.name} refused this account's sign-in (401). It closes the connection on a refused request over 2 MiB ` +
+    `(this one was ${mb} MiB) instead of answering, which is why it read as ECONNRESET. ` +
+    (a.source === "desktop" ? `Sign in to ${site.name} desktop again.` : `Sign in to ${site.name} again in magpie.`)
+  return new Response(JSON.stringify({ error: { message, type: "authentication_error", code: 401 } }), {
+    status: 401,
+    statusText: "Unauthorized",
+    headers: { "content-type": "application/json" },
+  })
+}
+
+// meter asks the billing API as magpie's built-in did, its errors said
+// the same: WorkBuddy's message, else its code, else the HTTP status.
+async function meter(site, a, path, body = {}) {
+  const res = await meterAsked(site, a, path, body)
   let env = {}
   try {
     env = JSON.parse(await res.text()) ?? {}
@@ -1555,7 +1605,8 @@ function makePlugin(site) {
             const fit = fitted(body)
             body = normalizeToolChoice(fit.body)
             attend(headers, body, session)
-            const send = (b) => fetch(req ? req.url : input, { ...init, method: init?.method ?? req?.method, headers, body: b })
+            const send = (b) =>
+              fetch(req ? req.url : input, { ...init, method: init?.method ?? req?.method, headers, body: b }).catch((e) => unanswered(site, a, b, e, init?.signal))
             // a model known to turn tool results then the user's message away
             // gets the empty reply between them up front (see endsAfterTools)
             const model = chatOf(body)?.model
@@ -1711,4 +1762,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
+export const _internal = { EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, turnKey, conversationKey, signatureOf }
