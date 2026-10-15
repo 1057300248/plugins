@@ -234,30 +234,46 @@ function variantFor(families, model, effort) {
 // run) what all its variants Devin named say; undefined when Devin said
 // nothing of it or its variants disagree. An entry is free (free: true) when
 // every variant of Devin's it stands for is in free, the ids Devin says its
-// quota doesn't count (parseFree).
-function listed(families, keep = [], images = {}, free = new Set()) {
+// quota doesn't count (parseFree). A family stands for the variants
+// variantFor sends it as, those at an effort and its default, not every
+// model Devin files under it: Devin gives SWE-2 three -lightning variants
+// at the High cost tier (2026-10-15), which no effort of swe-2 is sent as,
+// and with them in, swe-2 was no longer free. An entry's price (cost) is
+// what Devin lists for the variants it stands for when they all list the
+// same (parsePrices); none when they differ or Devin lists none.
+function listed(families, keep = [], images = {}, free = new Set(), prices = new Map()) {
   const all = (ids) => ids.length > 0 && ids.every((id) => free.has(id))
+  const priced = (ids) => {
+    const ps = ids.map((id) => prices.get(id))
+    if (!ps.length || !ps[0] || ps.some((p) => JSON.stringify(p) !== JSON.stringify(ps[0]))) return undefined
+    return ps[0]
+  }
+  const own = (f, t) => {
+    const ids = Object.values(byLevel(f, t))
+    if (!t && f.models.length && !ids.includes(f.models[0].id)) ids.push(f.models[0].id)
+    return ids
+  }
   const out = []
   const seen = new Set()
-  const add = ({ free, ...m }) => {
+  const add = ({ free, cost, ...m }) => {
     if (seen.has(m.id)) return
     seen.add(m.id)
-    out.push(free ? { ...m, free } : m)
+    out.push({ ...m, ...(free ? { free } : cost ? { cost } : {}) })
   }
   for (const f of families) {
     const context = f.models.find((m) => m.context)?.context ?? 0
     const output = f.models.find((m) => m.output)?.output ?? 0
     const image = familyImages(f, images)
-    add({ id: f.uid, name: f.label, context, output, efforts: efforts(f, ""), image, free: all(f.models.map((m) => m.id)) })
+    add({ id: f.uid, name: f.label, context, output, efforts: efforts(f, ""), image, free: all(own(f, "")), cost: priced(own(f, "")) })
     for (const t of tiers(f)) {
       const id = f.uid + "-" + t
       if (families.some((g) => named(g, id))) continue
-      add({ id, name: f.label + " " + TIERS.find(([w]) => w === t)[1], context, output, efforts: efforts(f, t), image, free: all(Object.values(byLevel(f, t))) })
+      add({ id, name: f.label + " " + TIERS.find(([w]) => w === t)[1], context, output, efforts: efforts(f, t), image, free: all(own(f, t)), cost: priced(own(f, t)) })
     }
     if (f.models.length === 1) continue
     for (const m of f.models) {
       if (m.id === f.uid || tierOf(m.id)[1]) continue
-      add({ id: m.id, name: m.name, context: m.context || context, output: m.output || output, efforts: [], image: images[m.id], free: free.has(m.id) })
+      add({ id: m.id, name: m.name, context: m.context || context, output: m.output || output, efforts: [], image: images[m.id], free: free.has(m.id), cost: prices.get(m.id) })
     }
   }
   for (const id of keep) {
@@ -266,7 +282,7 @@ function listed(families, keep = [], images = {}, free = new Set()) {
     const m = f?.models.find((m) => m.id === id)
     const level = tierOf(id)[1]
     if (!m && !level) continue
-    add({ id, name: m?.name || id, context: m?.context ?? 0, output: m?.output ?? 0, efforts: level ? [level] : [], image: images[id], free: free.has(id) })
+    add({ id, name: m?.name || id, context: m?.context ?? 0, output: m?.output ?? 0, efforts: level ? [level] : [], image: images[id], free: free.has(id), cost: prices.get(id) })
   }
   return out
 }
@@ -346,6 +362,39 @@ function parseFree(b) {
   return out
 }
 
+// parsePrices reads the same response for what Devin lists each model at,
+// in USD per 1M tokens: a config's model_uid (22) and its prices (32, one
+// each), each a label (1: "Input", "Cached input", "Output"), a fixed32
+// float (2) and its unit (3: "1M tokens"). A model in the Free tier lists
+// none. Only a price per 1M tokens is taken, and a model is priced only
+// when it lists input or output above 0.
+function parsePrices(b) {
+  const out = new Map()
+  const words = { Input: "input", "Cached input": "read", Output: "output" }
+  for (const f of fields(b)) {
+    if (f.num !== 1 || f.wire !== 2) continue
+    let uid = ""
+    const p = {}
+    for (const g of fields(f.data)) {
+      if (g.num === 22 && g.wire === 2) uid = dec.decode(g.data)
+      else if (g.num === 32 && g.wire === 2) {
+        let label = ""
+        let unit = ""
+        let v = NaN
+        for (const h of fields(g.data)) {
+          if (h.num === 1 && h.wire === 2) label = dec.decode(h.data)
+          else if (h.num === 3 && h.wire === 2) unit = dec.decode(h.data)
+          else if (h.num === 2 && h.wire === 5) v = new DataView(h.data.buffer, h.data.byteOffset, 4).getFloat32(0, true)
+        }
+        // a float32's 1.4 is 1.39999997…: the price as Devin wrote it
+        if (words[label] && unit === "1M tokens" && Number.isFinite(v) && v >= 0) p[words[label]] = +v.toPrecision(6)
+      }
+    }
+    if (uid && (p.input > 0 || p.output > 0)) out.set(uid, { input: p.input ?? 0, output: p.output ?? 0, cache: { read: p.read ?? 0 } })
+  }
+  return out
+}
+
 // parseConfigFamilies reads the same response as the families `devin
 // models list` makes of it, in its order: each config's label (1), context
 // (18), and model_info (23) with its output (13) and family uid (23); the
@@ -399,7 +448,7 @@ const said = new Map()
 // first ask isn't waited for.
 async function configsFor(key, server, wait = true) {
   let c = said.get(key)
-  if (!c) said.set(key, (c = { images: null, families: null, free: new Set(), at: 0, failed: 0, asking: null }))
+  if (!c) said.set(key, (c = { images: null, families: null, free: new Set(), prices: new Map(), at: 0, failed: 0, asking: null }))
   const ask = () =>
     (c.asking ??= (async () => {
       try {
@@ -414,7 +463,7 @@ async function configsFor(key, server, wait = true) {
         const images = parseModelConfigs(b)
         if (!images) throw new Error("GetCliModelConfigs: no models")
         const families = parseConfigFamilies(b)
-        Object.assign(c, { images, families: families.length ? families : null, free: parseFree(b), at: Date.now(), failed: 0 })
+        Object.assign(c, { images, families: families.length ? families : null, free: parseFree(b), prices: parsePrices(b), at: Date.now(), failed: 0 })
       } catch {
         c.failed = Date.now()
       } finally {
@@ -495,7 +544,7 @@ function runtimeModel(m) {
     status: "active",
     headers: {},
     options: {},
-    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    cost: { input: m.cost?.input ?? 0, output: m.cost?.output ?? 0, cache: { read: m.cost?.cache?.read ?? 0, write: 0 } },
     limit: { context: m.context, output: m.output },
     capabilities: {
       temperature: true,
@@ -1008,6 +1057,7 @@ function fields(b) {
       i += Number(l)
     } else if (f.wire === 5) {
       if (i + 4 > b.length) break
+      f.data = b.subarray(i, i + 4)
       i += 4
     } else break
     out.push(f)
@@ -1757,14 +1807,14 @@ export async function DevinAuthPlugin() {
         if (auth?.type !== "api" || !auth.key) return provider.models
         const { key, server } = await live(auth)
         const images = await imagesFor(key, server)
-        const { free } = await configsFor(key, server)
+        const { free, prices } = await configsFor(key, server)
         const families = await ownFamilies(key, server)
         if (!families) return withImages(provider.models, listed(familiesOf(SNAPSHOT), Object.keys(provider?.models ?? {}), images))
-        return Object.fromEntries(listed(families, Object.keys(provider?.models ?? {}), images, free).map((m) => [m.id, runtimeModel(m)]))
+        return Object.fromEntries(listed(families, Object.keys(provider?.models ?? {}), images, free, prices).map((m) => [m.id, runtimeModel(m)]))
       },
     },
   }
 }
 
 // for tests
-export const _internal = { parseFree, geminiSchema, freeIDs, outID, inID, objectRoot, seesImages, imagesFor, forgetSaid: () => said.clear(), parseModelConfigs, parseConfigFamilies, SNAPSHOT_IMAGES, withImages, forgetImages: () => (seen = null), effortOf, runtimeModel, configModel, live, build, failure, complete, parseFamilies, listed, variantFor, familiesOf, SNAPSHOT, parseStatus, readsHome, tierName, whoByKey, success, familiesFor, readCredentials, credentials, fields, frame, PB, events, frames }
+export const _internal = { parseFree, parsePrices, geminiSchema, freeIDs, outID, inID, objectRoot, seesImages, imagesFor, forgetSaid: () => said.clear(), parseModelConfigs, parseConfigFamilies, SNAPSHOT_IMAGES, withImages, forgetImages: () => (seen = null), effortOf, runtimeModel, configModel, live, build, failure, complete, parseFamilies, listed, variantFor, familiesOf, SNAPSHOT, parseStatus, readsHome, tierName, whoByKey, success, familiesFor, readCredentials, credentials, fields, frame, PB, events, frames }
