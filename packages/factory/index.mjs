@@ -13,8 +13,13 @@ const API = "https://api.factory.ai"
 const API_EU = "https://api.eu.factory.ai"
 // droid's WorkOS client, production
 const CLIENT_ID = "client_01HNM792M5G5G1A2THWPXKFMXB"
-// the droid release the requests say they are
-const VERSION = "0.233.0"
+// the droid release the requests say they are: the current one (droid
+// 0.242.0's X-Client-Version and User-Agent). Its binary reads a
+// server-side min_cli_version, and both reports of every model answered a
+// bare 403 "Forbidden" (0.1.16, 0.1.30) came with this release behind
+// droid's while every other header matched; whether Factory refuses an old
+// release so is not confirmed
+const VERSION = "0.242.0"
 // how long before an access token lapses it is renewed (droid: a minute)
 const REFRESH_LEAD = 2 * 60 * 1000
 // and how long before, magpie renews it ahead of time (auth.refresh): a
