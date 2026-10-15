@@ -207,9 +207,20 @@ A version bump pushed to `main` ships itself, two ways
 A package's first version can't go through trusted publishing: a Trusted
 Publisher is set on a package that exists, and setting one takes an
 owner's 2FA. Until an owner of the magpie-community npm org
-publishes it (`scripts/publish.sh <otp>`) and sets its Trusted Publisher as
-above, magpie serves it from `dist`, and the publish run notes it without
-failing. The repository's `NPM_TOKEN` secret, a granular token with 2FA
+publishes it and sets its Trusted Publisher as above, magpie serves it
+from `dist`, and the publish run notes it without failing.
+
+An owner does all of it with one command, from any checkout:
+
+```sh
+sh scripts/owner.sh            # --dry-run says what it would do
+```
+
+It first-publishes every package npm doesn't have and makes its Trusted
+Publisher, makes again (with npm publish allowed) the Trusted Publisher of
+every package whose version npm lacks, and runs `publish.yml` for those.
+It works from origin/main, skips what is up to date, and asks for 2FA in
+the browser. The repository's `NPM_TOKEN` secret, a granular token with 2FA
 bypassed, still publishes a first version while npm lets such tokens
 publish (npm plans to end that in January 2027).
 
