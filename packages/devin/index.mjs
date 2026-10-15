@@ -1198,6 +1198,59 @@ function foldRoot(root, ps, depth) {
 
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v)
 
+// geminiSchema is a tool's parameters as Devin's Gemini models take them.
+// Devin answers "There is an issue with this request, please try a
+// different model" (invalid_argument) to a Gemini model offered a tool
+// whose schema, at any depth, has a type that is a list (["string",
+// "null"], as zod-to-json-schema writes a nullable field), an array with
+// no items, items that are a list or true, or properties or an enum with no
+// type (7eleven on Discord, ZCode on gemini-4-argon). Its Claude models
+// and swe-2 take all of them, so only a Gemini uid gets this. A list type
+// becomes its one type, nullable when it had "null", or anyOf of each;
+// such an array's items become {} (a one-schema list, that schema); a
+// schema with properties is an object; an enum's type comes from its
+// values, and an enum of mixed values goes. The caller's own is never
+// changed.
+function geminiSchema(s, depth = 0) {
+  if (!isObj(s) || depth > 32) return s
+  const out = { ...s }
+  const sub = (v) => geminiSchema(v, depth + 1)
+  for (const k of ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"])
+    if (isObj(out[k])) out[k] = Object.fromEntries(Object.entries(out[k]).map(([n, v]) => [n, sub(v)]))
+  for (const k of ["anyOf", "oneOf", "allOf", "prefixItems"]) if (Array.isArray(out[k])) out[k] = out[k].map(sub)
+  for (const k of ["additionalProperties", "not", "if", "then", "else", "contains"]) if (isObj(out[k])) out[k] = sub(out[k])
+  if (Array.isArray(out.type)) {
+    const types = [...new Set(out.type.filter((t) => typeof t === "string"))]
+    const some = types.filter((t) => t !== "null")
+    if (some.length < types.length && some.length) out.nullable = true
+    if (some.length === 1) out.type = some[0]
+    else if (!some.length) out.type = types.length ? "null" : undefined
+    else {
+      delete out.type
+      const branches = some.map((t) => ({ type: t, ...(t === "array" ? { items: {} } : {}) }))
+      out.anyOf = Array.isArray(out.anyOf) ? [...out.anyOf, ...branches] : branches
+    }
+    if (out.type === undefined) delete out.type
+  }
+  if (out.type === undefined && Array.isArray(out.enum)) {
+    const vals = out.enum.filter((v) => v !== null)
+    if (vals.length < out.enum.length) out.nullable = true
+    const kinds = new Set(vals.map((v) => (Number.isInteger(v) ? "integer" : typeof v)))
+    const one = kinds.size === 1 ? [...kinds][0] : kinds.size === 2 && kinds.has("integer") && kinds.has("number") ? "number" : ""
+    if (["string", "integer", "number", "boolean"].includes(one)) {
+      out.type = one
+      out.enum = vals
+    } else delete out.enum
+  }
+  if (out.type === undefined && isObj(out.properties)) out.type = "object"
+  if (out.type === "array" || (out.type === undefined && Object.hasOwn(out, "items"))) {
+    if (Array.isArray(out.items)) out.items = out.items.length === 1 && isObj(out.items[0]) ? sub(out.items[0]) : {}
+    else out.items = isObj(out.items) ? sub(out.items) : {}
+    out.type = "array"
+  }
+  return out
+}
+
 const osName = () => (process.platform === "win32" ? "windows" : process.platform)
 
 // metadata is what each request says of the client: the CLI's own (with
@@ -1287,6 +1340,7 @@ function build(chat, uid, key) {
     .filter((t) => (!t?.type || t.type === "function") && t.function?.name)
     .map((t) => ({ name: t.function.name, description: t.function.description ?? "", schema: objectRoot(t.function.parameters) }))
   if (chat.tool_choice === "none") tools = []
+  if (/gemini/i.test(uid)) tools = tools.map((t) => ({ ...t, schema: geminiSchema(t.schema) }))
   const instructions = joinNonEmpty(system.join("\n\n"), toolDescriptions(tools))
   if (instructions) {
     let at = msgs.findIndex((m) => m.role === USER)
@@ -1713,4 +1767,4 @@ export async function DevinAuthPlugin() {
 }
 
 // for tests
-export const _internal = { parseFree, freeIDs, outID, inID, objectRoot, seesImages, imagesFor, forgetSaid: () => said.clear(), parseModelConfigs, parseConfigFamilies, SNAPSHOT_IMAGES, withImages, forgetImages: () => (seen = null), effortOf, runtimeModel, configModel, live, build, failure, complete, parseFamilies, listed, variantFor, familiesOf, SNAPSHOT, parseStatus, readsHome, tierName, whoByKey, success, familiesFor, readCredentials, credentials, fields, frame, PB, events, frames }
+export const _internal = { parseFree, geminiSchema, freeIDs, outID, inID, objectRoot, seesImages, imagesFor, forgetSaid: () => said.clear(), parseModelConfigs, parseConfigFamilies, SNAPSHOT_IMAGES, withImages, forgetImages: () => (seen = null), effortOf, runtimeModel, configModel, live, build, failure, complete, parseFamilies, listed, variantFor, familiesOf, SNAPSHOT, parseStatus, readsHome, tierName, whoByKey, success, familiesFor, readCredentials, credentials, fields, frame, PB, events, frames }
