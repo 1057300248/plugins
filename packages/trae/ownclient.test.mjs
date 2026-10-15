@@ -48,6 +48,9 @@ function client(userId, { encoded = true, dcs = [DC] } = {}) {
 }
 
 async function checkIn(auth = signedIn()) {
+  // one fake at a time: a second opened over the first would put the
+  // first's host back as the realm's own when it closes
+  f?.close()
   f = fakeTrae()
   f.route("POST /trae/api/v2/ug/checkin_credits/claim", () => json({ code: 0 }))
   f.route("POST /trae/api/v2/pay/ide_user_ent_usage", () => json({ code: 0 }))
