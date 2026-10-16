@@ -24,6 +24,11 @@ const STUDIO = "https://commandcode.ai"
 const BASE = API + "/provider/v1"
 const CLI_VERSION = "1.72.2"
 const MAX_TOKENS = 64000 // the CLI's max_tokens when none is asked
+// MAX_OUTPUT is the most max_tokens Command Code takes at /alpha/generate,
+// for any model: more is refused, the whole request with it ("Too big:
+// expected number to be <=200000 at params.max_tokens") — magpie's
+// CommandCodeMaxOutput
+const MAX_OUTPUT = 200_000
 const ORIGINS = ["https://commandcode.ai", "https://staging.commandcode.ai"]
 const SIGN_IN_TIMEOUT = 10 * 60 * 1000
 
@@ -175,6 +180,19 @@ const GO_EFFORTS = Object.fromEntries(GO_MODELS.map((m) => [m.id, m.efforts ?? [
 
 const isClaude = (id) => /^claude-/i.test(id) || id.startsWith("anthropic/")
 
+// FREE are the models Command Code's CLI marks FREE in its picker (1.73.2:
+// badge:"free", "{name} is free and uses shared capacity"); its API's list
+// doesn't say so, and Space Bunny Alpha's and Pixel Canary's ids name
+// nothing free — magpie's cmdFree. Neither says a model is served at a
+// discount.
+const FREE = new Set([
+  "stealth/space-bunny-alpha", "stealth/pixel-canary",
+  "poolside/laguna-s-2.1-free", "inclusionai/ling-3.0-flash-free",
+  "inclusionai/ling-3.0-flash-sante:free", "inclusionai/ling-3.1-flash:free",
+  "MiniMaxAI/MiniMax-M3-Free", "minimax/minimax-m3-free",
+  "minimax/minimax-m2.7-free", "meituan/LongCat-2.0:free", "tencent/Hy3",
+])
+
 // configModel is a model as opencode.json's provider.models has it.
 function configModel(m) {
   const npm = m.npm ?? (isClaude(m.id) ? MESSAGES : CHAT)
@@ -220,6 +238,8 @@ function runtimeModel(m) {
     },
     release_date: "",
     variants: Object.fromEntries((m.efforts ?? []).map((e) => [e, { reasoningEffort: e }])),
+    // magpie's plugin host reads it; the CLI calls the model free
+    ...(FREE.has(m.id) ? { free: true } : {}),
   }
 }
 
@@ -467,8 +487,11 @@ function limits(c) {
 // and weekly limits, and the dollars as one more, used of the CLI's pool
 // (the plan's month of credits, or what is left of it if more, and the
 // bought and free ones) as its /usage bar is. A reply with neither windows
-// nor a plan tells a balance: a key's money, not an allowance.
-function allowanceOf(c) {
+// nor a plan tells a balance: a key's money, not an allowance. The month's
+// credits come back at until, the end of the plan's period
+// (billing/subscriptions' currentPeriodEnd), when it is known
+// (yetone/magpie#2454).
+function allowanceOf(c, until) {
   const out = { windows: limits(c) }
   const [, name, planMonthly] = planOf(c?.credits?.planId)
   if (name) out.plan = name
@@ -485,7 +508,7 @@ function allowanceOf(c) {
   }
   if (known && planMonthly > 0) {
     const pool = Math.max(planMonthly, monthly) + left - monthly
-    out.windows.push({ name: "Credits", used: Math.min(100, (100 * (pool - left)) / pool), display: money(pool - left) + " / " + money(pool) })
+    out.windows.push({ name: "Credits", used: Math.min(100, (100 * (pool - left)) / pool), display: money(pool - left) + " / " + money(pool), ...(until ? { resetsAt: until } : {}) })
   } else if (known && !out.windows.length) out.balance = money(left)
   return out
 }
@@ -559,7 +582,7 @@ async function usage(key, saved) {
     // is made of is the subscription's plan's
     const c = credits.c ?? {}
     extraSeen.set(key, hasExtra(c))
-    out = allowanceOf({ ...c, credits: { ...(c.credits ?? {}), planId: c.credits?.planId || sub?.id || "" } })
+    out = allowanceOf({ ...c, credits: { ...(c.credits ?? {}), planId: c.credits?.planId || sub?.id || "" } }, sub?.until)
   }
   if (sub) {
     out.plan = sub.plan
@@ -882,7 +905,9 @@ function generateBody(chat, place = {}) {
     messages,
     tools,
     system: system.join("\n\n"),
-    max_tokens: chat.max_completion_tokens || chat.max_tokens || MAX_TOKENS,
+    // within what Command Code takes: more is refused, the whole request
+    // with it
+    max_tokens: Math.min(chat.max_completion_tokens || chat.max_tokens || MAX_TOKENS, MAX_OUTPUT),
     stream: true,
   }
   if (typeof chat.temperature === "number") params.temperature = chat.temperature

@@ -43,7 +43,7 @@ test("a Max account: its 5 hours, its week and its credits, and its period", asy
     windows: [
       { name: "5 hours", used: 25, span: 18000, resetsAt: new Date(reset).toISOString() },
       { name: "Weekly", used: 10, span: 604800, resetsAt: new Date(week).toISOString() },
-      { name: "Credits", used: 30.9375, display: "$49.50 / $160.00" },
+      { name: "Credits", used: 30.9375, display: "$49.50 / $160.00", resetsAt: "2026-10-28T00:00:00.000Z" },
     ],
   })
   expect(seen.every((x) => x.auth === "Bearer own-key")).toBe(true)
@@ -90,7 +90,7 @@ test("seconds and string amounts read as magpie reads them; a half cent goes to 
     signIn: "kept",
     plan: "Pro",
     until: new Date(1790000000 * 1000).toISOString(),
-    windows: [{ name: "Weekly", used: 100, span: 604800 }, { name: "Credits", used: 0.4166666666666667, display: "$0.12 / $30.00" }],
+    windows: [{ name: "Weekly", used: 100, span: 604800 }, { name: "Credits", used: 0.4166666666666667, display: "$0.12 / $30.00", resetsAt: new Date(1790000000 * 1000).toISOString() }],
   })
 })
 
