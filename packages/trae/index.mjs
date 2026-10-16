@@ -15,6 +15,10 @@ import { createServer, STATUS_CODES } from "node:http"
 import { homedir, release, version as osVersion } from "node:os"
 import { join } from "node:path"
 
+// SEES is a fallback model that takes images, as Trae's lists mark it
+// (multimodal: true)
+const SEES = { attachment: true, modalities: { input: ["text", "image"], output: ["text"] } }
+
 const SITES = {
   // Trae CN (trae.cn): the authorization page sends the browser back to a
   // callback on 127.0.0.1 with the account's Cloud-IDE-JWT and refresh
@@ -74,8 +78,8 @@ const SITES = {
     models: {
       "glm-5.2": { name: "GLM-5.2", limit: { context: 200_000, output: 32_000 } },
       "glm-5": { name: "GLM-5" },
-      "kimi-k2.6": { name: "Kimi K2.6", limit: { context: 256_000, output: 0 } },
-      "qwen-3.7-plus": { name: "Qwen 3.7 Plus" },
+      "kimi-k2.6": { name: "Kimi K2.6", limit: { context: 256_000, output: 0 }, ...SEES },
+      "qwen-3.7-plus": { name: "Qwen 3.7 Plus", ...SEES },
       "DeepSeek-V4-Pro": { name: "DeepSeek V4 Pro" },
       "DeepSeek-V4-Flash": { name: "DeepSeek V4 Flash" },
     },
@@ -915,15 +919,36 @@ const partText = (content) => {
     .join("\n")
 }
 
-// traeMessages is the conversation as Trae's chat takes it
-function traeMessages(req) {
+// imageOf is an image part of a message as Trae's chat takes one: OpenAI's
+// image_url part, {url} in it, which is what TRAE's ai-agent sends
+// (LLMRawMultiContent's image_url, LLMRawChatImageURL) and what the
+// open-source relays pass llm_utils_chat unchanged. null for a part that
+// isn't an image, or one with no url.
+function imageOf(p) {
+  if (p?.type !== "image_url" && p?.type !== "input_image") return null
+  const url = typeof p.image_url === "string" ? p.image_url : p.image_url?.url ?? p.url
+  return typeof url === "string" && url ? { type: "image_url", image_url: { url } } : null
+}
+
+// partsOf is a message's text and, for a model that sees, its images apart
+// from it; a model that doesn't is told in the text that one was there
+const partsOf = (content, sees) => {
+  if (!sees || !Array.isArray(content)) return { text: partText(content), images: [] }
+  const images = content.map(imageOf).filter(Boolean)
+  return { text: partText(content.filter((p) => !imageOf(p))), images }
+}
+
+// traeMessages is the conversation as Trae's chat takes it. sees is whether
+// the model takes images: Trae's list says so of each model (multimodal),
+// and a model it says doesn't is sent the placeholder, not the image.
+function traeMessages(req, sees = false) {
   const tools = Array.isArray(req.tools) && req.tools.length && req.tool_choice !== "none" ? req.tools : []
   const names = new Map()
   const out = []
   if (tools.length) out.push({ role: "system", text: toolPrompt(tools, req.tool_choice, req.parallel_tool_calls) })
   for (const m of req.messages ?? []) {
     const role = m.role === "developer" ? "system" : m.role
-    let text = partText(m.content)
+    let { text, images } = partsOf(m.content, sees)
     if (role === "assistant") {
       const calls = (m.tool_calls ?? []).map((c) => {
         names.set(c.id, c.function?.name)
@@ -936,20 +961,24 @@ function traeMessages(req) {
       text = [text, ...calls].filter(Boolean).join("\n")
       out.push({ role: "assistant", text })
     } else if (role === "tool") {
-      out.push({ role: "user", text: `Result of ${names.get(m.tool_call_id) || m.name || "the tool"} (call ${m.tool_call_id ?? "?"}):\n${text}` })
+      out.push({ role: "user", text: `Result of ${names.get(m.tool_call_id) || m.name || "the tool"} (call ${m.tool_call_id ?? "?"}):\n${text}`, images })
     } else {
-      out.push({ role: role === "system" ? "system" : "user", text })
+      out.push({ role: role === "system" ? "system" : "user", text, images })
     }
   }
-  // Trae takes no empty message, nor two of one role in a row
+  // Trae takes no empty message, nor two of one role in a row; a message of
+  // an image alone is not empty
   const merged = []
   for (const m of out) {
-    if (!m.text) continue
+    const images = m.images ?? []
+    if (!m.text && !images.length) continue
     const last = merged.at(-1)
-    if (last && last.role === m.role && m.role !== "system") last.text += "\n\n" + m.text
-    else merged.push({ ...m })
+    if (last && last.role === m.role && m.role !== "system") {
+      last.text = [last.text, m.text].filter(Boolean).join("\n\n")
+      last.images = [...last.images, ...images]
+    } else merged.push({ role: m.role, text: m.text, images })
   }
-  return merged.map((m) => ({ role: m.role, content: [{ type: "text", text: m.text }] }))
+  return merged.map((m) => ({ role: m.role, content: [...(m.text ? [{ type: "text", text: m.text }] : []), ...m.images] }))
 }
 
 // nativeTools are the tools as Trae names them: parameters a JSON string
@@ -1024,10 +1053,10 @@ function sessionOf(headers) {
 // tool result sent back, a retry, another function answering) shows up in the
 // usage detail as several, each under no title at all. request_id stays a
 // fresh id per request, being that request's own.
-function chatBody(req, fn, modelName, most = 0, max = null, session = "") {
+function chatBody(req, fn, modelName, most = 0, max = null, session = "", sees = false) {
   const config = max?.base ?? req.model
   const body = {
-    messages: traeMessages(req),
+    messages: traeMessages(req, sees),
     function: fn,
     config_name: config,
     model: config,
@@ -2270,6 +2299,12 @@ function chatModel(m, site) {
   return true
 }
 
+// seesOf is whether a list's entry says its model takes images: Trae's
+// lists mark each one multimodal true or false (Doubao-Seed, Kimi K3,
+// Qwen 3.7 Plus take them; GLM-5 and DeepSeek V4 don't). null when the
+// entry doesn't say.
+const seesOf = (m) => (typeof m?.multimodal === "boolean" ? m.multimodal : typeof m?.display_config?.multimodal === "boolean" ? m.display_config.multimodal : null)
+
 // devModel is the model an entry serves requests with: its __dev one
 const devModel = (m) => (Array.isArray(m?.model_detail_list) ? m.model_detail_list : []).find((d) => /__dev$/.test(String(d?.model_name ?? "")))
 
@@ -2352,6 +2387,8 @@ const makePlugin = (site) => async ({ client }) => {
   const modelNames = new Map()
   // the Max each model the list last read has (null: none)
   const maxes = new Map()
+  // whether each model the list last read takes images (its multimodal)
+  const sight = new Map()
 
   const save = async (auth) => {
     try {
@@ -2595,6 +2632,9 @@ const makePlugin = (site) => async ({ client }) => {
     }
     for (const [id, { m, fn }] of out) {
       listedBy.set(id, fn)
+      const sees = seesOf(m)
+      if (sees === null) sight.delete(id)
+      else sight.set(id, sees)
       const dev = devModel(m)
       if (dev) modelNames.set(id, { fn, name: dev.model_name, most: Number(dev.max_tokens) || 0 })
       else modelNames.delete(id)
@@ -2633,16 +2673,24 @@ const makePlugin = (site) => async ({ client }) => {
     const out = Number(devModel(m)?.max_tokens) || was.limit?.output || 0
     const name = m.display_config?.display_name || m.display_name || m.display_model_name || was.name || id
     const input = (k) => (MODEL.modalities?.input ?? []).includes(k)
+    // the list's multimodal says whether the model takes images, over the
+    // fallback list's word and MODEL's
+    const sees = seesOf(m)
+    const inputs = was.capabilities?.input ?? { text: true, image: input("image"), audio: input("audio"), video: input("video"), pdf: input("pdf") }
+    const sight = sees === null ? {} : {
+      modalities: { input: [...new Set([...((was.modalities ?? MODEL.modalities).input ?? ["text"]).filter((k) => k !== "image"), ...(sees ? ["image"] : [])])], output: (was.modalities ?? MODEL.modalities).output ?? ["text"] },
+      attachment: sees,
+    }
     return {
-      ...MODEL, ...was, id, providerID: site.id, name: String(name), limit: { context: ctx, output: out },
+      ...MODEL, ...was, ...sight, id, providerID: site.id, name: String(name), limit: { context: ctx, output: out },
       api: was.api ?? { id, url: site.hosts.api, npm: "@ai-sdk/openai-compatible" },
       capabilities: {
         ...(was.capabilities ?? {}),
         reasoning: was.capabilities?.reasoning ?? MODEL.reasoning,
         temperature: was.capabilities?.temperature ?? MODEL.temperature,
-        attachment: was.capabilities?.attachment ?? MODEL.attachment,
+        attachment: sees ?? was.capabilities?.attachment ?? MODEL.attachment,
         toolcall: was.capabilities?.toolcall ?? MODEL.tool_call,
-        input: was.capabilities?.input ?? { text: true, image: input("image"), audio: input("audio"), video: input("video"), pdf: input("pdf") },
+        input: sees === null ? inputs : { ...inputs, image: sees },
         output: was.capabilities?.output ?? { text: true, image: false, audio: false, video: false, pdf: false },
       },
       // Trae's request takes no effort or thinking level, so a model has
@@ -2739,6 +2787,10 @@ const makePlugin = (site) => async ({ client }) => {
               if (named) fns.unshift(named.fn)
             }
             const max = named?.max ?? null
+            // a model the list hasn't said of is sent its images: the agent
+            // sends them only to a model it was told takes them
+            const base = max?.base ?? String(req.model)
+            const sees = sight.get(base) ?? (site.models[base]?.modalities?.input?.includes("image") ?? true)
             // the answer's own signal: the caller's abort (a cancelled
             // request) and the stream's cancel both stop Trae's fetch, so
             // no read is left hanging on a connection the agent walked
@@ -2758,7 +2810,7 @@ const makePlugin = (site) => async ({ client }) => {
               const res = await fetch(apiOf(a, site) + "/api/agent/v3/llm_utils_chat", {
                 method: "POST",
                 headers: ideHeaders(a, site, { Accept: "text/event-stream", "X-Request-ID": randomUUID() }),
-                body: JSON.stringify(chatBody(req, fn, named?.fn === fn || max ? named.name : "", named?.fn === fn || max ? named.most : 0, max, session)),
+                body: JSON.stringify(chatBody(req, fn, named?.fn === fn || max ? named.name : "", named?.fn === fn || max ? named.most : 0, max, session, sees)),
                 signal: ac.signal,
               })
               if (!res.ok) {

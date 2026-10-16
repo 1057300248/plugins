@@ -151,7 +151,15 @@ agent's `POST https://trae-api-cn.mchost.guru/api/agent/v3/llm_utils_chat`:
     request's (`read`); any other goes on as written, so the agent can say
     the tool doesn't exist.
   - Earlier calls and their results go back in as text.
-  - Images aren't sent.
+  - Images: Trae's lists mark each model `multimodal` true or false (the
+    Doubao-Seed models, Kimi K3 and K2.6, Qwen 3.7 Plus and MiniMax M3 take
+    images; GLM-5 and DeepSeek V4 don't). A model marked true is listed
+    as one that takes images, and an image sent to it goes in the
+    message's content as an OpenAI `image_url` part beside the text, as
+    TRAE's own agent sends one (plugins#161). A model marked false gets
+    "[an image, which this model can't see]" in its place. A model whose
+    list hasn't been read is sent its images, unless the fallback list
+    says it takes none.
 
 The model list is the account's own, from
 `/api/ide/v1/batch_get_detail_param`, every function's list in one ask, as
