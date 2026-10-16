@@ -132,13 +132,20 @@ test("refreshTokens orders hosts by the token's source_id and falls back on 4000
   }
   try {
     // An agent (SMS) token tries the CN host first, and its /refresh answers 400002
+    // the expiry is read off the clock while refreshTokens runs: it is
+    // between the clock before and after, not the clock read again later
+    const before = Date.now()
     const out = await refreshTokens(jwt({ source_id: "agent", device_id: "dev-1" }), [])
+    const after = Date.now()
     expect(requests.map((r) => `${new URL(r.url).origin}${r.url.pathname}`)).toEqual([
       "https://autoglm-api.zhipuai.cn/userapi/v1/refresh",
       "https://autoglm-api.zhipuai.cn/userapi/v1/agent-refresh",
     ])
     expect(requests[0].body.device_id).toBe("dev-1")
-    expect(out).toEqual({ access: "a2", refresh: "r2", expires: Date.now() + 3600_000 - 600_000 })
+    const { expires, ...tokens } = out
+    expect(tokens).toEqual({ access: "a2", refresh: "r2" })
+    expect(expires).toBeGreaterThanOrEqual(before + 3600_000 - 600_000)
+    expect(expires).toBeLessThanOrEqual(after + 3600_000 - 600_000)
   } finally {
     globalThis.fetch = realFetch
   }
