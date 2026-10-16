@@ -645,6 +645,17 @@ function thinking(req, model) {
   return 20000
 }
 
+// formatText is the structured output a request asks for, said in words:
+// Anthropic's output_config.format (or the AI SDK's output_format) with a
+// JSON schema, "" when it asks for none. A JSON object with no schema
+// reaches the plugin already told in the system prompt, as Messages has no
+// field for it.
+function formatText(req) {
+  const f = req.output_config?.format ?? req.output_format
+  if (f?.type !== "json_schema" || !f.schema || typeof f.schema !== "object") return ""
+  return "Respond with a single JSON value and nothing else, matching this JSON schema:\n" + JSON.stringify(f.schema) + "."
+}
+
 // buildKiro is the body of a generateAssistantResponse call.
 function buildKiro(req, model, profile, budget) {
   const entries = []
@@ -756,6 +767,10 @@ function buildKiro(req, model, profile, budget) {
   for (const e of entries) if (e.assistantResponseMessage && !e.assistantResponseMessage.toolUses.length) delete e.assistantResponseMessage.toolUses
   // the instructions go at the head of the first message
   let system = typeof req.system === "string" ? req.system : textOf(req.system)
+  // Kiro has no field for the answer's format: it is told in words, at the
+  // end of the instructions, as magpie's built-in tells it (inSystem)
+  const format = formatText(req)
+  if (format) system = system ? system + "\n\n" + format : format
   if (budget) system = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>` + (system ? "\n" + system : "")
   if (system) entries[0].userInputMessage.content = system + "\n\n" + entries[0].userInputMessage.content
   if (Array.isArray(req.system)) mark(entries[0].userInputMessage, req.system)
