@@ -37,7 +37,12 @@ test("asks for one read, usage:summary, and nothing else", () => {
 test("is a page magpie serves: its files in page/, scripts as files", () => {
   expect(pkg.main).toBeUndefined()
   expect(pkg.exports).toBeUndefined()
-  expect(pkg.magpie.page).toEqual({ title: "Usage glance", file: "page/index.html", icon: "page/icon.svg" })
+  expect(pkg.magpie.page).toEqual({
+    title: "Usage glance",
+    titles: { zh: "用量速览", "zh-TW": "用量速覽", ja: "使用量の概要", de: "Nutzung im Überblick" },
+    file: "page/index.html",
+    icon: "page/icon.svg",
+  })
   const html = read("index.html")
   expect(html).toContain('<script src="_magpie/bridge.js"></script>')
   // the policy runs no inline script

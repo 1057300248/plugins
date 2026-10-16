@@ -19,7 +19,9 @@ h2 { font-size: 13px; font-weight: 600; margin: 0; }
 .seg button { font: inherit; color: var(--muted); background: none; border: 0; border-radius: 6px; padding: 3px 10px; cursor: default; }
 .seg button[aria-selected="true"] { color: var(--fg); background: var(--bg); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
 .seg.small button { padding: 2px 8px; font-size: 12px; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 22px; }
+/* four across, two by two when narrow: never a row with a hole in it */
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 22px; }
+@media (max-width: 640px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .tile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-width: 0; }
 .tile .k { color: var(--muted); font-size: 12px; }
 .tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

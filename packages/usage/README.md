@@ -2,7 +2,7 @@
 
 A page in [magpie](https://usemagpie.ai)'s window with your usage at a glance. It shows calls, errors, tokens and cost for today, 7 days or 30 days, and the models that took them.
 
-Install it from magpie's **Plugins › Discover**, or with `magpie plugin add @magpie-community/page-usage`. It then has a tab, **Usage glance**, under Plugins in the sidebar, in the app and in `magpie web`.
+Install it from magpie's **Plugins › Discover**, or with `magpie plugin add @magpie-community/page-usage`. It then has a tab, **Usage glance** (titled in the window's language: 用量速览, 用量速覽, 使用量の概要, Nutzung im Überblick), under Plugins in the sidebar, in the app and in `magpie web`.
 
 ## What it reads
 
@@ -30,4 +30,4 @@ The page saves the period (`today`, `7d`, `30d`) and the model sort (`tokens`, `
 bun test packages/usage
 ```
 
-中文：在 magpie 窗口里加一个「Usage glance」页面，一眼看到今天、7 天或 30 天的调用、错误、token 和费用，以及用到的模型。它只读取声明过的 `usage:summary`，运行在无网络的沙盒 frame 里。
+中文：在 magpie 窗口里加一个「用量速览」页面，一眼看到今天、7 天或 30 天的调用、错误、token 和费用，以及用到的模型。它只读取声明过的 `usage:summary`，运行在无网络的沙盒 frame 里。
