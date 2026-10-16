@@ -172,7 +172,8 @@ function configModels() {
       reasoning: m.efforts.length > 0,
       attachment: m.images,
       tool_call: true,
-      temperature: true,
+      // OpenAI's reasoning models take no temperature (droidBody)
+      temperature: m.upstream !== "openai",
       modalities: { input: m.images ? ["text", "image"] : ["text"], output: ["text"] },
       cost: { input: 0, output: 0 },
       limit: { context: m.context, output: m.output },
@@ -474,11 +475,18 @@ function droidBody(path, body) {
   if (path.endsWith("/responses")) {
     const v = m.instructions
     if (v !== undefined && v !== null && typeof v !== "string") return body // not something droid sends
+    // OpenAI's reasoning models turn temperature and top_p away with a 400,
+    // and droid sends neither (Nowledge Mem on gpt-6.1-sol, magpie's Discord)
+    const sampled = byId.get(m.model)?.upstream === "openai" && ("temperature" in m || "top_p" in m)
+    if (sampled) {
+      delete m.temperature
+      delete m.top_p
+    }
     const opened = promptOpenings(m.input)
     const ins = promptText(v ?? "")
     if (!ins.startsWith(DROID_LINE)) m.instructions = ins.trim() === "" ? DROID_LINE : DROID_LINE + "\n" + ins
     else if (ins !== v || opened) m.instructions = ins
-    else return body
+    else if (!sampled) return body
   } else if (path.endsWith("/chat/completions")) {
     if (!Array.isArray(m.messages)) return body
     const opened = promptOpenings(m.messages, true)
