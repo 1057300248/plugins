@@ -988,7 +988,12 @@ async function usage(auth, save) {
   }
   const end = me.plan?.subscription_period?.ended_at
   if (typeof end === "string" && RFC3339.test(end) && !isNaN(Date.parse(end))) out.until = end
+  // the account's row keeps naming a free plan "Free" (planName, saved
+  // above); its card says "No plan", which magpie's card knows and
+  // translates, unless an overdue invoice is what it says, as the
+  // built-in's zedLoginQuota did
   if (me.plan?.has_overdue_invoices) out.error = "Zed: this account has an overdue invoice, so its models are paused (see zed.dev/account)"
+  else if (plan === "zed_free" || plan === "") out.plan = "No plan"
   return out
 }
 

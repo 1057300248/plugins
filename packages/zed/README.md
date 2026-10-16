@@ -72,9 +72,25 @@ GitHub login.
   (Claude Sonnet 5, Opus 5.5, Haiku 4.5, GPT-5.5, Gemini 3.5 Flash,
   Grok 4.7), which the account's list replaces.
 
-## Not included
+## Usage
 
-- magpie's plan display: plan name, billing period, overdue invoices. Zed
-  doesn't report how much of the allowance is spent.
-- Several Zed accounts at once. OpenCode keeps one sign-in per provider.
-- magpie's web-search stand-in.
+magpie's `auth.usage` hook shows what Zed tells its editor of the plan,
+as magpie's built-in Zed account did. Zed doesn't report how much of the
+allowance is spent, so there are no windows:
+
+- the plan's name (Pro, Pro Trial, Business, Student, VIP). A free
+  account's card says "No plan"; its account row still names it Free;
+- when the billing period ends;
+- an overdue invoice, as the card's error ("its models are paused");
+- a sign-in Zed refuses (`/users/me` or the model list answering 401)
+  marks the account as needing to sign in again. A plan that changed is
+  saved with the sign-in.
+
+## In magpie, not the plugin
+
+These come from magpie itself, as they did for the built-in:
+
+- Several Zed accounts at once. magpie keeps a sign-in per account and
+  switches between them; plain OpenCode keeps one sign-in per provider.
+- Web search. A model that can't search is given magpie's web-search
+  stand-in, when a search API is set up in magpie.
