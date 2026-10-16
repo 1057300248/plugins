@@ -287,3 +287,41 @@ test("native transport: a burst of KV requests past the queue bound waits for wr
   expect(most).toBeLessThanOrEqual(16)
   expect(written.map((w) => number(nest(w.subarray(5), 3), 1))).toEqual(Array.from({ length: 300 }, (_, i) => 1000 + i))
 })
+
+// #155 (midmirror, Auto): a step of 13 calls, nine of them long-argument
+// tools, failed after batchWait with no call delivered; the same step
+// sealed on a retry that took 33s. Cursor sends each call once the model
+// has written it, so the calls arrive spread over longer than batchWait
+// with no single pause that long. 0.2.15 counted batchWait from the first.
+test("native protocol: a step whose calls keep arriving seals past batchWait from its first call (#155)", async () => {
+  const { run } = owner({}, { batchWait: 300 })
+  const gap = () => new Promise((r) => setTimeout(r, 150))
+  async function* spread() {
+    for (const id of [7, 8, 9]) {
+      yield* frames([tool(id, "call-" + id, "long arguments " + id)])
+      await gap()
+    }
+    yield* frames([update(27, uint(1, 3))])
+    await new Promise(() => {})
+  }
+  run.pump(spread())
+  await until(() => run.error || run.state === "awaiting-results")
+  expect(run.error).toBeUndefined()
+  expect(run.segment.events.filter((e) => e.tool)).toHaveLength(3)
+  expect(run.segment.events.at(-1).stop).toBe("tool_calls")
+})
+
+test("native protocol: a step that stops sending fails batchWait after its latest call (#155)", async () => {
+  const { run } = owner({}, { batchWait: 300 })
+  const started = Date.now()
+  async function* stalled() {
+    yield* frames([tool(7, "call-7", "one")])
+    await new Promise((r) => setTimeout(r, 150))
+    yield* frames([tool(8, "call-8", "two"), update(27, uint(1, 3))])
+    await new Promise(() => {})
+  }
+  run.pump(stalled())
+  await until(() => run.error)
+  expect(run.error).toMatchObject({ status: 502, message: "Cursor did not complete its declared native tool batch" })
+  expect(Date.now() - started).toBeGreaterThanOrEqual(440)
+})

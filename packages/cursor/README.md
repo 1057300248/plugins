@@ -100,6 +100,10 @@ reach their bound (a long history asks for its blobs at once, and a slow link
 drains them slowly), the Run waits for the link to drain, and fails only if it
 doesn't for 30 seconds.
 
+A step's calls must all arrive within 30 seconds of each other: Cursor sends
+each one once the model has written it, so a step of many long calls can take
+longer than that in all (#155).
+
 Cursor's count of a step's tool calls includes calls the plugin answers itself:
 a tool the request doesn't have is refused to the model, and Cursor's own
 `get_mcp_tools` is answered with the request's tools. The step's calls are the
@@ -115,7 +119,11 @@ request can rebuild from its supplied history without submitting the result to
 the old native exec again.
 
 A native tool handoff reports zero usage with `magpie_native.accounting=pending`;
-the final native answer reports the turn's totals. An identical completed retry
+the final native answer bills the turn's totals. Its own `prompt_tokens` and
+`completion_tokens` are its last model call's share (the larger of that
+call's prompt estimate and the turn's mean per call), since a client reads
+them as how full its context is; the earlier calls' share is
+`usage.magpie_deferred` (#156). An identical completed retry
 replays the saved response with zero usage. A native final also collects earlier
 stateless debt as `usage.magpie_deferred`, separately from its own prompt total.
 If a started native Run is abandoned after a pending handoff, its dashboard

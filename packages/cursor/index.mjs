@@ -2592,7 +2592,8 @@ async function answerOf(auth, chat, signal, session = "") {
   const convID = conversationID(chat, session)
   const prepared = nativeSessions.prepare(tok, chat, convID, tools)
   let r
-  if (prepared.owner) r = prepared.owner.resume(prepared, signal)
+  // the continuation's own prompt, which its final step reports (#156)
+  if (prepared.owner) r = prepared.owner.resume({ ...prepared, estimate: conversation(chat, tools).estimate }, signal)
   const model = String(chat.model ?? "")
   if (!r) {
     let raw = []

@@ -148,7 +148,7 @@ async function agent(options = {}) {
       if (options.stallFinal) return
       send(update(4, text(1, "native final thinking")))
       send(update(1, text(1, marker)))
-      const usage = options.zeroUsage ? message(uint(1, 0), uint(2, 0), uint(5, 0)) : message(uint(1, 23), uint(2, 7), uint(3, 10), uint(4, 0), uint(5, 4))
+      const usage = options.turnUsage ?? (options.zeroUsage ? message(uint(1, 0), uint(2, 0), uint(5, 0)) : message(uint(1, 23), uint(2, 7), uint(3, 10), uint(4, 0), uint(5, 4)))
       send(update(14, usage))
       state(false, true) // late state after TurnEnded must still be retained
       if (!options.noEnd) delay(() => stream.end(end()), 55)
@@ -274,6 +274,32 @@ test("native retention: healthy two external roundtrips use one Run", async () =
   expect(a.results.map((r) => r.id)).toEqual([7, 8])
   expect(a.closes).toEqual([7, 8])
   expect(a.errors).toEqual([])
+})
+
+// #156 (erzay, Codex on cursor/claude-opus-5-5@1m): a turn of about 20 tool
+// steps ended with TurnEndedUpdate's totals, 1,105,934 prompt (1,035,734 read
+// from the cache, 70,156 written) as the final step's prompt_tokens; Codex
+// read that as its context and compacted a 61K one. The last call keeps its
+// own share; the rest is still billed, as magpie_deferred.
+test("native accounting: a multi-step turn's final step reports its own share, the rest deferred (#156)", async () => {
+  const turnUsage = message(uint(1, 1105934), uint(2, 2100), uint(3, 1035734), uint(4, 70156), uint(5, 900))
+  const a = await agent({ turnUsage }), account = auth(), chat = initial()
+  const first = await a.ask(account, chat)
+  const next = continueWith(chat, first.body, ["one"])
+  const second = await a.ask(account, next)
+  const final = await a.ask(account, continueWith(next, second.body, ["two"]))
+  expect(final.status).toBe(200)
+  expect(a.runs).toHaveLength(1)
+  const u = final.body.usage, d = u.magpie_deferred
+  // three model calls: none is more than half the turn
+  expect(u.prompt_tokens).toBeLessThan(1105934 / 2)
+  expect(u.prompt_tokens).toBeGreaterThan(0)
+  expect(u.total_tokens).toBe(u.prompt_tokens + u.completion_tokens)
+  expect(u.prompt_tokens + d.prompt_tokens).toBe(1105934)
+  expect(u.prompt_tokens_details.cached_tokens + d.cached_tokens).toBe(1035734)
+  expect(u.prompt_tokens_details.cache_write_tokens + d.cache_write_tokens).toBe(70156)
+  expect(u.completion_tokens + d.completion_tokens).toBe(2100)
+  expect(u.completion_tokens_details.reasoning_tokens).toBeLessThanOrEqual(u.completion_tokens)
 })
 
 test("native retention: Task parent awaiting results permits a child sharing session with different first user", async () => {

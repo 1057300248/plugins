@@ -454,6 +454,10 @@ class NativeSession {
     this.retainedBytes = 0
     this.sequence = 0
     this.segments = 0
+    // the model calls of the turn so far, and what was said before the
+    // latest one began: the last step's own share of the turn (#156)
+    this.steps = 1
+    this.stepSaid = 0
     this.said = 0
     this.wrote = 0
     this.terminal = false
@@ -515,6 +519,7 @@ class NativeSession {
     }
     this.transport = transport
     this.estimate = estimate
+    this.stepEstimate = estimate
     this.blobs = blobs
     this.knownHashes = new Set(blobs.keys())
     this.blobSize = [...blobs.values()].reduce((n, b) => n + b.length, 0)
@@ -571,6 +576,8 @@ class NativeSession {
     this.state = "submitting"
     clearTimeout(this.resultTimer)
     clearTimeout(this.batchTimer)
+    this.batchTimer = null
+    this.nextStep(prepared.estimate)
     try {
       for (let i = 0; i < prepared.results.length; i++) {
         const call = batch.calls.find((c) => c.id === prepared.results[i].tool_call_id)
@@ -620,8 +627,20 @@ class NativeSession {
     this.waitForBatch()
     this.sealBatch()
   }
+  // nextStep is Cursor's next model call in the same turn: after the
+  // caller's results, or after a step whose calls were all answered here.
+  nextStep(estimate) {
+    this.steps++
+    this.stepSaid = this.said
+    if (estimate != null) this.stepEstimate = estimate
+  }
+  // waitForBatch gives the step batchWait from its latest call, answered
+  // call or count, not from its first. Cursor sends each call once the model
+  // has written its arguments, so a step of many long calls arrives over
+  // longer than batchWait while never pausing that long (#155).
   waitForBatch() {
-    this.batchTimer ??= later(() => {
+    clearTimeout(this.batchTimer)
+    this.batchTimer = later(() => {
       if (this.segment.expected == null && this.segment.calls.length && !this.resultSubmitted) this.missingCount()
       else this.fail({ status: 502, message: "Cursor did not complete its declared native tool batch" })
     }, this.limits.batchWait)
@@ -636,6 +655,7 @@ class NativeSession {
   answeredCall() {
     if (this.terminal || this.state === "awaiting-results") return
     this.segment.answered++
+    if (this.batchTimer) this.waitForBatch()
     this.sealBatch()
   }
   listed(count) {
@@ -659,6 +679,7 @@ class NativeSession {
       segment.answered = 0
       clearTimeout(this.batchTimer)
       this.batchTimer = null
+      this.nextStep()
       return
     }
     clearTimeout(this.batchTimer)
@@ -762,6 +783,24 @@ class NativeSession {
     const u = usageOf(this.usageFields ?? [])
     if (!measuredInput) u.input = this.estimate
     if (!measuredOutput) u.output = Math.floor((this.said + 3) / 4)
+    // A turn of several model calls: TurnEndedUpdate counts them all, but a
+    // client reads the last response's prompt as how full its context is
+    // (Codex compacted a 61K context at 1.1M, #156). The last call keeps its
+    // own share, the larger of its prompt estimate and the turn's mean per
+    // call; the rest is billed as magpie_deferred.
+    let earlier = null
+    if (this.steps > 1) {
+      const whole = u.input + u.cacheRead + u.cacheWrite
+      const share = (total, own) => total > 0 ? Math.min(1, Math.max(own, total / this.steps) / total) : 0
+      const fi = share(whole, measuredInput ? this.stepEstimate ?? 0 : whole)
+      const fo = share(u.output, Math.floor((this.said - this.stepSaid + 3) / 4))
+      const own = {
+        input: Math.round(u.input * fi), cacheRead: Math.round(u.cacheRead * fi), cacheWrite: Math.round(u.cacheWrite * fi),
+        output: Math.round(u.output * fo), reasoning: Math.round(u.reasoning * fo),
+      }
+      earlier = { input: u.input - own.input, cacheRead: u.cacheRead - own.cacheRead, cacheWrite: u.cacheWrite - own.cacheWrite, output: u.output - own.output }
+      Object.assign(u, own)
+    }
     const prompt = u.input + u.cacheRead + u.cacheWrite
     this.finalUsage = {
       prompt_tokens: prompt, completion_tokens: u.output, total_tokens: prompt + u.output,
@@ -771,8 +810,9 @@ class NativeSession {
     }
     this.state = "finalizing"
     this.closeTransport()
-    const finish = (more) => {
+    const finish = (settled) => {
       if (this.error) return
+      const more = earlier && settled ? Object.fromEntries(Object.keys(earlier).map((k) => [k, earlier[k] + settled[k]])) : earlier ?? settled
       const deferred = more && more.input + more.output + more.cacheRead + more.cacheWrite > 0
       this.segment.finish({ stop: "stop", usage: {
         ...this.finalUsage,
@@ -816,6 +856,7 @@ class NativeSession {
                     this.said += text.length
                     if (u.num === 1) this.wrote += text.length
                     this.segment.emit(u.num === 1 ? { text } : { reasoning: text })
+                    if (this.batchTimer) this.waitForBatch()
                   }
                 } else if (u.num === 14) {
                   if (!this.segment.content && !this.segment.calls.length) invalid("an empty reply (Cursor ended the turn without text or a tool call)", 502)
