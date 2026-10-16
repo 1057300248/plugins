@@ -50,8 +50,10 @@ The plugin's `fetch` handles this:
     are sent as the tools' own.
   - A tool call the conversation never answered is answered with "Tool use
     was interrupted and did not produce a result."
-  - Images must be inline (`data:` URLs); images in tool results are
-    dropped.
+  - Images must be inline (`data:` URLs). The images a tool returned go
+    with its result, as magpie's built-in sends them: a tool message's own
+    `image_url` parts, and the ones magpie's gateway puts in the user
+    message after the results ("[From the result of …]").
 - It turns the streamed reply back into a chat completion, streamed or
   not: text, reasoning, tool calls and usage.
 - Failures keep their statuses: a refused token is a 401, a usage limit a

@@ -1334,6 +1334,32 @@ function formatText(f) {
   return "Respond with a single JSON value and nothing else, matching this JSON schema:\n" + JSON.stringify(schema) + "."
 }
 
+// inlineImage is an image_url part as Devin takes an image, its bytes and
+// type, or null for one that carries no bytes: Devin takes no URL, and
+// magpie's built-in sends only an image with its bytes (inlineImages).
+function inlineImage(p) {
+  if (p?.type !== "image_url") return null
+  const u = typeof p.image_url === "string" ? p.image_url : p.image_url?.url ?? ""
+  const d = /^data:([^,]*),(.*)$/s.exec(u)
+  return d && d[2] ? { data: d[2], type: d[1].replace(/;base64$/, "") || "image/png" } : null
+}
+
+// A chat's tool message holds text alone, so magpie's gateway (buildChat's
+// seeLater) sends the images a tool returned in the user message after the
+// results: each result's text ends saying how many follow (NOTE), and its
+// images are headed FROM "<tool> (tool call <id>):]" or FROM
+// "tool call <id>:]", ahead of the user's own words and images.
+const FROM = "[From the result of "
+const NOTE = /(?:\n\n)?\[The tool returned (an image; it|(\d+) images; they) follows? in the next message\.\]$/
+
+// noted is how many images a result's text says follow it, and its text
+// without saying so.
+function noted(text) {
+  const m = NOTE.exec(text)
+  if (!m) return { n: 0, text }
+  return { n: m[2] ? Number(m[2]) : 1, text: text.slice(0, m.index) }
+}
+
 // build is the GetChatMessage request for a chat completion, to the model
 // uid.
 function build(chat, uid, key) {
@@ -1344,11 +1370,30 @@ function build(chat, uid, key) {
     pending = []
   }
   const system = []
+  // the results just sent, by the call id the chat gave each, for the
+  // images that follow them in the user message after
+  const results = new Map()
+  const resultFor = (text) => {
+    if (typeof text !== "string" || !text.startsWith(FROM)) return null
+    for (const [id, r] of results) if (r.said.n > r.seen && (text === `${FROM}tool call ${id}:]` || text.endsWith(` (tool call ${id}):]`))) return r
+    return null
+  }
+  // settleResults gives each result just sent its text: without the note
+  // that its images follow when every one went back with it, and "(no
+  // output)" for none, as the built-in words it
+  const settleResults = () => {
+    for (const r of results.values()) {
+      if (r.said.n > 0 && r.seen === r.said.n) r.msg.text = r.said.text
+      r.msg.text ||= "(no output)"
+    }
+    results.clear()
+  }
   for (const m of joinSplitCalls(chat.messages ?? [])) {
     if (m.role === "system" || m.role === "developer") {
       system.push(textOf(m.content))
       continue
     }
+    if (m.role !== "tool" && m.role !== "user") settleResults()
     if (m.role === "assistant") {
       const calls = (m.tool_calls ?? []).map((c) => ({ id: inID(c.id), name: c.function?.name, args: argsOf(c.function?.arguments) }))
       const text = typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.filter((p) => p?.type === "text" && p.text).map((p) => p.text).join("\n\n") : ""
@@ -1364,8 +1409,10 @@ function build(chat, uid, key) {
       // only a call just made is answered, and only once
       const i = pending.findIndex((c) => c.id === inID(m.tool_call_id))
       if (i >= 0) {
-        let out = textOf(m.content) || "(no output)"
-        msgs.push({ role: TOOL, callID: pending[i].id, text: out })
+        const images = Array.isArray(m.content) ? m.content.map(inlineImage).filter(Boolean) : []
+        const msg = { role: TOOL, callID: pending[i].id, text: textOf(m.content), images }
+        msgs.push(msg)
+        results.set(m.tool_call_id, { msg, said: noted(msg.text), seen: 0 })
         pending.splice(i, 1)
       }
       continue
@@ -1375,20 +1422,32 @@ function build(chat, uid, key) {
     const images = []
     if (typeof m.content === "string") {
       if (m.content) texts.push(m.content)
-    } else
+    } else {
+      // the images a tool returned, which a chat's tool message can't
+      // hold, go back with the result that returned them, as magpie's
+      // built-in sends them (inlineImages): a tool message's images
+      // (field 10) and not a user message of their own
+      let to = null // the result the images that follow are of, until it has the number it said
       for (const p of m.content ?? []) {
-        if (p?.type === "text" && p.text) texts.push(p.text)
-        else if (p?.type === "image_url") {
-          const u = typeof p.image_url === "string" ? p.image_url : p.image_url?.url ?? ""
-          const d = /^data:([^,]*),(.*)$/s.exec(u)
-          if (d && d[2]) images.push({ data: d[2], type: d[1].replace(/;base64$/, "") || "image/png" })
+        if (p?.type === "text") {
+          to = results.size ? resultFor(p.text) : null
+          if (!to && p.text) texts.push(p.text)
+        } else if (p?.type === "image_url") {
+          const im = inlineImage(p)
+          if (to) {
+            if (im) to.msg.images.push(im)
+            if (++to.seen === to.said.n) to = null
+          } else if (im) images.push(im)
         }
       }
+    }
+    settleResults()
     const text = texts.join("\n\n")
     if (!text && !images.length) continue
     answer()
     msgs.push({ role: USER, text, images })
   }
+  settleResults()
   answer()
   // Devin has no field for the answer's format: it is told in words, at
   // the end of the instructions, as magpie's built-in tells it (inSystem)
