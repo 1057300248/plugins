@@ -19,6 +19,12 @@ magpie plugin login opencode-zen-free
 ## Sign in
 
 Enter `public` in the key field. No personal API key is needed.
+
+Whatever is typed in the key field, the plugin signs in with the one
+shared `public` credential: a key made under your own OpenCode account
+does nothing here, and several of them don't make several accounts. Your
+own Zen keys go in magpie's built-in OpenCode Zen provider (or OpenCode's
+`opencode` provider), which takes several keys.
 The credential is kept in OpenCode's `auth.json` or magpie's
 `plugin-auth.json`.
 
