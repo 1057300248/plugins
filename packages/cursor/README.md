@@ -13,11 +13,13 @@ An account is a Cursor access token. There are three ways to get one:
   plugin polls `api2.cursor.sh/auth/poll` until the browser has signed in.
   The account is named by its email (`DashboardService/GetMe`).
 - **cursor-agent's sign-in**: takes the account `cursor-agent login`
-  signed in to. Its token is read on every request from where the CLI
-  keeps it: the macOS keychain (`cursor-access-token`), else its
-  `auth.json` (`~/.cursor/`, `$XDG_CONFIG_HOME/cursor/` or
-  `%APPDATA%\Cursor\`). The plugin never writes it; when it has less than
-  5 minutes left, `cursor-agent status` is run, which renews it.
+  signed in to. Its token is read from where the CLI keeps it: the macOS
+  keychain (`cursor-access-token`), else its `auth.json` (`~/.cursor/`,
+  `$XDG_CONFIG_HOME/cursor/` or `%APPDATA%\Cursor\`). A keychain read is
+  kept for 10 seconds, and one the keychain refused (the user said no to
+  its dialog) is not asked again for 10 minutes; signing in reads it
+  afresh. The plugin never writes it; when it has less than 5 minutes
+  left, `cursor-agent status` is run, which renews it.
 - **Cursor API key**: a key from cursor.com/dashboard → Integrations. It is
   exchanged for a token at `/auth/exchange_user_api_key`, as the CLI does
   with `CURSOR_API_KEY`, and exchanged again when the token runs out.

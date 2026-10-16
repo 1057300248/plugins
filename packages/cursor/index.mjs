@@ -63,7 +63,7 @@ const exists = (p) => stat(p).then((s) => !s.isDirectory(), () => false)
 function run(file, args, { timeout = 10_000, env } = {}) {
   return new Promise((resolve) => {
     execFile(file, args, { timeout, env: env ?? process.env, maxBuffer: 8 << 20 }, (err, stdout) =>
-      resolve({ ok: !err, out: String(stdout ?? "") }))
+      resolve({ ok: !err, out: String(stdout ?? ""), code: typeof err?.code === "number" ? err.code : err ? -1 : 0 }))
   })
 }
 
@@ -117,12 +117,48 @@ function authFile() {
   return join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "cursor", "auth.json")
 }
 
+// TOKEN_TTL is how long a token read from the Keychain is taken as it: a
+// sign-in reads it afresh, one made in cursor-agent is seen within it.
+// KEYCHAIN_DENIED is how long a read the user may have been asked about,
+// and answered no to, is not asked again: with the item's trust list
+// holding no `security`, every ask can show the dialog again. Both as the
+// built-in's cursorKeychainToken (magpie #746, #2408).
+const TOKEN_TTL = 10_000
+const KEYCHAIN_DENIED = 10 * 60_000
+const keychain = { tok: "", at: 0, ask: 0, busy: null, now: () => Date.now(), read: (args) => run("security", args) }
+
+// keychainToken is cursor-agent's token in the Keychain, "" for none; fresh
+// reads it whatever was read last. Reads go one at a time, so callers at
+// once share one `security` run (and one dialog).
+function keychainToken(fresh = false) {
+  const go = async () => {
+    const now = keychain.now()
+    const ttl = !keychain.tok && now - keychain.ask < KEYCHAIN_DENIED ? KEYCHAIN_DENIED : TOKEN_TTL
+    if (!fresh && now - keychain.at < ttl) return keychain.tok
+    const r = await keychain.read(["find-generic-password", "-s", "cursor-access-token", "-a", "cursor-user", "-w"])
+    keychain.tok = ""
+    keychain.at = keychain.now()
+    if (r.ok) {
+      keychain.tok = r.out.trim()
+      keychain.ask = 0
+    } else if (r.code !== 44) {
+      // 44 is "no such item"; anything else may have been a dialog the
+      // user said no to, or a keychain that refused
+      keychain.ask = keychain.at
+    } else keychain.ask = 0
+    return keychain.tok
+  }
+  const p = (keychain.busy ?? Promise.resolve()).then(go, go)
+  keychain.busy = p.catch(() => {})
+  return p
+}
+
 // cliToken is the access token cursor-agent signed in with; read, never
-// written.
-async function cliToken() {
+// written. fresh reads the Keychain whatever was read last.
+async function cliToken(fresh = false) {
   if (GOOS === "darwin") {
-    const r = await run("security", ["find-generic-password", "-s", "cursor-access-token", "-a", "cursor-user", "-w"])
-    if (r.ok && r.out.trim()) return r.out.trim()
+    const t = await keychainToken(fresh)
+    if (t) return t
   }
   try {
     return JSON.parse(await readFile(authFile(), "utf8"))?.accessToken ?? ""
@@ -163,7 +199,7 @@ async function cliTokenNow() {
   if (exe) {
     cliRefresh ??= run(exe, ["status"], { timeout: 30_000 }).finally(() => (cliRefresh = null))
     await cliRefresh
-    tok = await cliToken()
+    tok = await cliToken(true)
   }
   // the built-in's words (provider.CursorToken)
   if (!tok) throw new AuthError("Cursor isn't signed in; sign in from magpie's Providers page or run `cursor-agent login`")
@@ -332,7 +368,7 @@ async function cliSignIn() {
     instructions: "Uses the account `cursor-agent login` signed in to.",
     method: "auto",
     async callback() {
-      const tok = await cliToken()
+      const tok = await cliToken(true)
       const exp = expiry(tok)
       if (!tok) return { type: "failed", error: "cursor-agent isn't signed in: run `cursor-agent login`" }
       if (exp && exp <= Date.now()) return { type: "failed", error: "cursor-agent's sign-in has run out: run `cursor-agent login` again" }
@@ -1209,7 +1245,9 @@ function conversation(chat, tools) {
         pending.splice(i, 1)
         const text = textOf(m.content)
         size += text.length
-        results.push(result(id, text, false))
+        // a failed tool's result says so, as the built-in's cursorResult
+        // told Cursor isError
+        results.push(result(id, text, m.is_error === true || m.isError === true))
       }
       continue
     }
@@ -2828,4 +2866,4 @@ export async function CursorAuthPlugin() {
 }
 
 // for tests
-export const _internal = { nativeTransport, onDemandOf,resetH1: () => (h1Until = 0), onH1: () => Date.now() < h1Until, H2, H1, h2Blocked, open, openH1, openH2, STEP_WAIT, stepUsage, usageKey, ledger, owed, flights, misses, unreadable, catalog, usable, request, modelsOf, tokensOf, maxRequired, conversationID, usageOf, sessionOf, SESSION, errorResponse, kept, poolBase, conversation, buildRun, decode, exec, fields, pb, pbValue, pbAny, frame, frames, failure, toolsOf, expiry }
+export const _internal = { keychain, keychainToken, nativeTransport, onDemandOf,resetH1: () => (h1Until = 0), onH1: () => Date.now() < h1Until, H2, H1, h2Blocked, open, openH1, openH2, STEP_WAIT, stepUsage, usageKey, ledger, owed, flights, misses, unreadable, catalog, usable, request, modelsOf, tokensOf, maxRequired, conversationID, usageOf, sessionOf, SESSION, errorResponse, kept, poolBase, conversation, buildRun, decode, exec, fields, pb, pbValue, pbAny, frame, frames, failure, toolsOf, expiry }
