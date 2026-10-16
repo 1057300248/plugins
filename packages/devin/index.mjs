@@ -1322,6 +1322,18 @@ const inID = (id) => {
   return raw && outID(raw) === id ? raw : id
 }
 
+// formatText is the structured output a chat's response_format asks for,
+// said in words as magpie's built-in says it (format.go's instruction):
+// json_schema's schema, or any JSON object for json_object or a schema of
+// no shape; "" for text or none.
+function formatText(f) {
+  if (f?.type === "json_object") return "Respond with a single JSON object and nothing else."
+  if (f?.type !== "json_schema") return ""
+  const schema = f.json_schema ? f.json_schema.schema : f.schema
+  if (schema === undefined || schema === null) return "Respond with a single JSON object and nothing else."
+  return "Respond with a single JSON value and nothing else, matching this JSON schema:\n" + JSON.stringify(schema) + "."
+}
+
 // build is the GetChatMessage request for a chat completion, to the model
 // uid.
 function build(chat, uid, key) {
@@ -1378,6 +1390,10 @@ function build(chat, uid, key) {
     msgs.push({ role: USER, text, images })
   }
   answer()
+  // Devin has no field for the answer's format: it is told in words, at
+  // the end of the instructions, as magpie's built-in tells it (inSystem)
+  const format = formatText(chat.response_format)
+  if (format) system.push(format)
   const last = msgs[msgs.length - 1]
   if (!last || (last.role === ASSISTANT && !last.calls.length)) msgs.push({ role: USER, text: "Please proceed with the task." })
 
