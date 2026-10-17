@@ -164,6 +164,39 @@ credits are read from the enterprise meter
 page reads: the cycle's credits used of its limit, and when the cycle
 resets (magpie #1904).
 
+## When free models work but a credit model does not
+
+Check the failing account and model separately before concluding that the
+wallet is empty:
+
+- Use the exact API id from the account's model list. For example,
+  `glm-5.3-flash` is the id; `GLM-5.3-Flash` is its display name. A route
+  copied from another provider need not be a valid WorkBuddy model id.
+- The WorkBuddy 5.6+ encrypted-desktop message means this sign-in cannot
+  be read, not that the account has zero credits. Use **Account (browser)**
+  for the same build/region. Keep the old entry until the new identity and
+  model list are confirmed. The desktop file is not decrypted or changed.
+- An account restricted by WorkBuddy is a different failure. Code 11140
+  with its unusual-activity message calls for **Submit feedback** in
+  WorkBuddy; signing in repeatedly or changing the model does not lift it.
+  See [magpie#1849](https://github.com/yetone/magpie/issues/1849).
+- Inspect each attempted provider/account in magpie's routing details.
+  A ZCode trial quota failure, another provider's insufficient credits, or
+  one account's restriction is not the balance of every WorkBuddy account.
+
+A model response confirms that the selected account can answer. It does
+not, without a matching vendor usage record, prove how many credits that
+request deducted. A usage-read error means the balance is unknown.
+
+The encrypted-desktop result can be reproduced without an account using
+`packages/workbuddy/usage.test.mjs` in an isolated temporary HOME (and
+USERPROFILE on Windows). It covers sign-in, usage and chat against a
+synthetic sealed desktop file, and checks that the file stays unchanged.
+A successful browser authorization alone is not a migration: compare the
+returned identity with the intended desktop account before replacing its
+entry. An already signed-in browser can simply renew another saved account.
+
+
 ## Not here
 
 magpie's built-in WorkBuddy does more than this package:
