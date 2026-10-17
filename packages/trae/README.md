@@ -281,7 +281,11 @@ an empty answer.
 
 Trae CN gives credits for a daily check-in (每日签到); Trae Global has no
 such page, so this is CN only. magpie can press it
-once a day for each account (Settings, or the switch on the usage card).
+once a day for each account (Settings, or the switch on the usage card),
+through `auth.checkin`: `claimed` when Trae grants the credits, `done`
+when the status or Trae's 9095 says this device has already claimed,
+`inactive` when the page is disabled, and `failed` for a turned-away
+sign-in or Trae's 9074 busy answer.
 It asks Trae CN's own pages through
 this plugin's fetch, which sends them as the account, as Trae CN's IDE
 (3.3.104) sends them: its Cloud-IDE-JWT (renewed first when near its

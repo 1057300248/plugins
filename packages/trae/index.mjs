@@ -113,6 +113,10 @@ const SITES = {
     // Trae CN's account info carries no region: its one deployment is the
     // one it is asked through
     regionOf: () => "",
+    checkin: {
+      status: { path: "/trae/api/v2/ug/checkin_credits/status" },
+      claim: { path: "/trae/api/v2/ug/checkin_credits/claim" },
+    },
     // where usage is asked, and which page it is (CN: credits)
     usage: {
       kind: "credits",
@@ -2530,6 +2534,39 @@ const makePlugin = (site) => async ({ client }) => {
     return new Response(text, { status: res.status, headers })
   }
 
+  // checkin asks Trae CN's own pages as magpie's check-in host does, with
+  // the same account, device and renewal as any own page. Trae Global has
+  // no such page.
+  const checkin = async (getAuth) => {
+    if (!site.checkin) return { outcome: "inactive", message: `${site.realm} has no daily check-in` }
+    const a0 = fromAuth(await getAuth(), site)
+    if (!a0) return { outcome: "failed", message: "not signed in" }
+    const base = site.hosts.auth + site.checkin.status.path
+    const status = await ownRequest(getAuth, a0, base, "POST", "{}")
+    const statusText = await status.text()
+    let body
+    try { body = JSON.parse(statusText) } catch {}
+    if (!body || typeof body !== "object" || Array.isArray(body)) return { outcome: "failed", message: `check-in status: unreadable reply ${statusText.trim().slice(0, 120) || "(empty)"}` }
+    const e = errorOf(body)
+    if (status.status === 401 || lapsedCode(e.code, site)) return { outcome: "failed", message: e.message || `${a0.name || a0.uid}: Trae's sign-in has expired` }
+    if (status.status !== 200 || (e.code && String(e.code) !== "0")) return { outcome: "failed", message: e.message || statusLine(status.status) }
+    if (body?.checked_in) return { outcome: "done", ...(Number(body.credits) > 0 ? { credit: Number(body.credits) } : {}) }
+    if (!body?.enable) return { outcome: "inactive" }
+    const claim = await ownRequest(getAuth, a0, site.hosts.auth + site.checkin.claim.path, "POST", "{}")
+    const claimText = await claim.text()
+    let answer
+    try { answer = JSON.parse(claimText) } catch {}
+    const ce = errorOf(answer)
+    if (claim.status === 401 || lapsedCode(ce.code, site)) return { outcome: "failed", message: ce.message || `${a0.name || a0.uid}: Trae's sign-in has expired` }
+    if (String(ce.code) === "9095") return { outcome: "ineligible", message: ce.message || "this device has checked in today" }
+    if (String(ce.code) === "9074") return { outcome: "ineligible", message: `${ce.message} — check in in the Trae CN app` }
+    if (claim.status !== 200 || (ce.code && String(ce.code) !== "0")) return { outcome: "failed", message: ce.message || statusLine(claim.status) }
+    if (!answer || typeof answer !== "object" || Array.isArray(answer)) return { outcome: "failed", message: `check-in claim: unreadable reply ${claimText.trim().slice(0, 120) || "(empty)"}` }
+    const credit = Number(answer.credits) + Number(answer.extra_credits || 0)
+    const fallback = Number(body.credits) + Number(body.extra_credits || 0)
+    return { outcome: "claimed", ...(credit > 0 ? { credit } : fallback > 0 ? { credit: fallback } : {}) }
+  }
+
   const usage = async (getAuth) => {
     let a
     try {
@@ -2773,6 +2810,7 @@ const makePlugin = (site) => async ({ client }) => {
     auth: {
       provider: site.id,
       usage,
+      checkin,
       // magpie renews the token LEAD_MS before its end, once, before its
       // requests, models and usage ask; the check before each request
       // stays for OpenCode, which doesn't call this
