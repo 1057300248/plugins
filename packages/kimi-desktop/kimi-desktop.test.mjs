@@ -8,10 +8,65 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { KimiAdapter } from './adapter.mjs';
 import { controlEndpoint } from './rpc.mjs';
 import { agent, connect } from './kimi-desktop.agent.js';
+import { applyInstructions } from './library.mjs';
 
 const official = 'https://agent-gw.kimi.com/coding/v1';
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value)); };
+
+test('Library uses ordinary Kimi native resources while keeping prior MCP and skills', async () => {
+  const f = await fixture();
+  try {
+    const native = path.join(f.kimiDir || f.controller.kimiDir, 'runtime/kimi-code/home');
+    const mcp = {mcpServers: {existing: {url: 'https://example.invalid/mcp'}}};
+    write(path.join(native, 'mcp.json'), mcp);
+    const skill = path.join(f.controller.kimiDir, 'skills/existing/SKILL.md');
+    fs.mkdirSync(path.dirname(skill), {recursive: true});
+    fs.writeFileSync(skill, 'synthetic existing skill');
+    f.controller.bootstrap();
+    expect(read(path.join(f.controller.stateDir, 'library-native/mcp.json'))).toEqual(mcp);
+    expect(fs.readFileSync(path.join(f.controller.stateDir, 'library-skills/existing/SKILL.md'), 'utf8')).toBe('synthetic existing skill');
+    expect(agent.library.mcpFormat).toBe('kimi');
+    expect(agent.library.instructions).toEndWith('/AGENTS.md');
+    fs.unlinkSync(path.join(f.controller.stateDir, 'library-native'));
+    fs.mkdirSync(path.join(f.controller.stateDir, 'library-native'));
+    expect(() => f.controller.bootstrap()).toThrow('library_path_conflict');
+    expect(read(path.join(native, 'mcp.json'))).toEqual(mcp);
+  } finally { await f.cleanup(); }
+});
+
+test('shared instructions hot-update in existing conversations without replacing Kimi prompts or tools', async () => {
+  const f = await fixture();
+  try {
+    await f.controller.tick();
+    const original = {model: 'k2d8-preview', messages: [
+      {role: 'system', content: 'Kimi native system prompt'},
+      {role: 'user', content: [{type: 'text', text: 'synthetic history'}]},
+      {role: 'assistant', tool_calls: [{id: 'synthetic-call', type: 'function', function: {name: 'Read', arguments: '{}'}}]},
+      {role: 'tool', tool_call_id: 'synthetic-call', content: 'synthetic tool result'},
+    ]};
+    for (const text of ['synthetic rule one', 'synthetic rule two', '']) {
+      fs.writeFileSync(f.controller.instructionsFile, text);
+      const response = await fetch(f.controller.bridgeURL + '/chat/completions', {method: 'POST',
+        headers: {Authorization: 'Bearer synthetic-kimi-key'}, body: JSON.stringify(original)});
+      expect(response.status).toBe(200); await response.text();
+      const messages = f.requests.at(-1).body.messages;
+      expect(messages[0]).toEqual(original.messages[0]);
+      expect(messages.slice(text ? 2 : 1)).toEqual(original.messages.slice(1));
+      expect(messages.filter(x => x.role === 'system')).toHaveLength(text ? 2 : 1);
+      if (text) expect(messages[1].content).toContain(text);
+    }
+    fs.writeFileSync(f.controller.instructionsFile, 'synthetic active rule');
+    const once = applyInstructions(original, f.controller.instructionsFile);
+    expect(applyInstructions(once, f.controller.instructionsFile)).toEqual(once);
+    fs.writeFileSync(f.controller.instructionsFile, Buffer.from([0xff]));
+    const failed = await fetch(f.controller.bridgeURL + '/chat/completions', {method: 'POST',
+      headers: {Authorization: 'Bearer synthetic-kimi-key'}, body: JSON.stringify(original)});
+    expect(failed.status).toBe(503);
+    expect((await failed.json()).error.code).toBe('instructions_unavailable');
+    expect(f.requests).toHaveLength(3);
+  } finally { await f.cleanup(); }
+});
 
 async function fixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'magpie-kimi-fixture-'));
@@ -260,7 +315,8 @@ test('reconnects retain only changed model fields, never a full credential backu
       f.controller.catalogAfter = 0;
       await f.controller.tick();
       expect(f.controller.status.code).toBe('connected');
-      const saved = fs.readdirSync(f.controller.stateDir).map(name => fs.readFileSync(path.join(f.controller.stateDir, name), 'utf8')).join('\n');
+      const saved = fs.readdirSync(f.controller.stateDir).filter(name => fs.lstatSync(path.join(f.controller.stateDir, name)).isFile())
+        .map(name => fs.readFileSync(path.join(f.controller.stateDir, name), 'utf8')).join('\n');
       expect(saved).not.toContain('synthetic-kimi-key');
       expect(saved).not.toContain('synthetic-refresh-before');
       write(f.controller.connectionFile, {...f.connection, enabled: false});

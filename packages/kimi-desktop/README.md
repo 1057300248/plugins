@@ -10,6 +10,18 @@ Open and sign in to Kimi desktop. On Magpie's Agents page select **Kimi**, pick 
 
 Disconnect Kimi in Magpie to restore its original model service address. Existing conversations, login credentials, unrelated settings, and native model entries are preserved.
 
+## Library: instructions, MCP and skills
+
+Version 0.1.1 registers ordinary **Kimi** as a target on all three Library pages. This is separate from **Kimi Code**. Existing assignments stay unchanged; select Kimi on the resources you want to share.
+
+- Shared instructions are written by Magpie to `~/.config/magpie-kimi/AGENTS.md`. While connected, the adapter reads this file before each inference and inserts one separate system message, preserving Kimi's original prompts, tool calls and history. Changes also apply to existing Work conversations on their next request. Removing the assignment removes Magpie's managed block; other text in that file remains the user's own instructions. An unreadable/invalid file fails with `instructions_unavailable` rather than silently omitting active rules. These instructions do not apply when disconnected, to Chat, or to cloud Claw.
+- MCP points through `~/.config/magpie-kimi/library-native/mcp.json` to ordinary Kimi's `daimon-share/daimon/runtime/kimi-code/home/mcp.json`. The format is Kimi's `mcpServers` object. Existing server entries are retained by Magpie's normal Library merge; new conversations load changed MCP settings. Existing conversations can use Kimi's own reconnect controls.
+- Skills point through `~/.config/magpie-kimi/library-skills` to ordinary Kimi's `daimon-share/daimon/skills`. This exposes existing native skills as well as Library assignments. Bundled/user skills are not deleted or replaced by the adapter. Conflicts use Magpie's normal keep-own/use-library choice. Start a new Work conversation to load changed skills.
+
+The two directory links are Windows junctions or macOS directory symlinks; no administrator authorization or app modification is needed. An existing different object at either link path is left intact and reports `library_path_conflict`. Resource files remain in Kimi when the model bridge disconnects. The adapter does not enable all resources or change another agent's assignments.
+
+The Work provider carries an agent's messages unchanged; a provider is not a separate instruction target. Give shared instructions to the agent making the request. Using Kimi Work in Codex therefore uses Codex's instructions, while ordinary Kimi uses the Kimi assignment above.
+
 ## How it works
 
 The import-free `kimi-desktop.agent.js` registers the agent using Magpie's agent interface. The Bun entry `index.mjs` is also necessary: Kimi's actual configuration belongs to its running local runtime, so changing a file alone does not reliably apply a model. It runs a loopback adapter and uses Kimi's authenticated local control API to reload the selected model.

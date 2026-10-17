@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { once } from 'node:events';
 import { rpc } from './rpc.mjs';
 import { normalizeModels, mergeRuntimeModels, isMenuAlias } from './catalog.mjs';
+import { prepareLibrary, applyInstructions } from './library.mjs';
 
 const PROVIDER = 'daimon-kimi-code';
 const TOOL_ORIGIN = 'https://agent-gw.kimi.com';
@@ -69,6 +70,7 @@ export class KimiAdapter {
     this.statusFile = path.join(this.stateDir, 'status.json');
     this.catalogFile = path.join(this.stateDir, 'menu-catalog.json');
     this.modelBackupFile = path.join(this.stateDir, 'before-menu-models.json');
+    this.instructionsFile = path.join(this.stateDir, 'AGENTS.md');
     this.catalog = [];
     Object.assign(this, { intervalMs, stabilityMs, rpcCall, fetchImpl, log });
     this.ownerID = crypto.randomUUID();
@@ -83,6 +85,7 @@ export class KimiAdapter {
   bootstrap() {
     if (!fs.existsSync(this.configFile)) return false;
     fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    prepareLibrary(this.stateDir, this.kimiDir);
     if (!fs.existsSync(this.connectionFile)) {
       try {
         fs.writeFileSync(this.connectionFile, JSON.stringify({ schemaVersion: 1, enabled: false,
@@ -211,6 +214,8 @@ export class KimiAdapter {
         catch { error(503, 'catalog_unavailable'); return; }
         if (!allowed.some(row => row.id === model)) { error(409, 'model_not_enabled_for_kimi'); return; }
         payload.model = model;
+        try { payload = applyInstructions(payload, this.instructionsFile); }
+        catch (failure) { error(failure.message === 'invalid_messages' ? 400 : 503, failure.message); return; }
       }
       const headers = { 'Content-Type': 'application/json',
         Authorization: inference ? 'Bearer ' + active.gatewayKey : req.headers.authorization };
@@ -391,6 +396,7 @@ export class KimiAdapter {
       this.report('connected', { model: desired.model });
     } catch (error) {
       const codes = new Set(['invalid_gateway', 'invalid_connection', 'unsupported_kimi_config',
+        'library_path_conflict',
         'kimi_config_changed', 'kimi_control_unavailable', 'kimi_control_timeout', 'kimi_control_closed', 'kimi_control_rejected']);
       const code = codes.has(error.message) ? error.message : 'adapter_failed';
       this.report(code);

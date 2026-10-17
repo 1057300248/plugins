@@ -6,6 +6,12 @@ export const agent = {
   format: 'json',
   model: 'model',
   dir: '~/.config/magpie-kimi',
+  library: {
+    instructions: '~/.config/magpie-kimi/AGENTS.md',
+    mcp: '~/.config/magpie-kimi/library-native/mcp.json',
+    mcpFormat: 'kimi',
+    skills: '~/.config/magpie-kimi/library-skills',
+  },
   ua: ['Desktop Kimi Work'],
   notice: '接入普通 Kimi 桌面版的 Work。请先打开 Kimi，插件会在本地 Agent 就绪后连接；Chat 不受影响。',
 };
