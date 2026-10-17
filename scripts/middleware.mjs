@@ -1,6 +1,8 @@
 // Runs a gateway middleware's cases the way magpie's gateway calls it: one
 // ctx for the request's hooks (so ctx.state carries over), each body a fresh
 // copy of its JSON, undefined keeping what came in, null dropping an event.
+// A case's provider is the one the request is tried on (ctx.provider): its
+// request goes on through onProvider, and what it expects is that try's.
 // The same cases.json runs in magpie's own JavaScript engine (moejs), so a
 // middleware is checked in both.
 import { readFileSync } from "node:fs"
@@ -25,6 +27,10 @@ export async function run(mod, c) {
     const r = m.onRequest ? await m.onRequest(copy(c.request), ctx) : undefined
     if (rejected) out.reject = rejected
     else out.request = r === undefined ? c.request : copy(r)
+    if (!rejected && c.provider && m.onProvider) {
+      const p = await m.onProvider(copy(out.request), { ...ctx, provider: c.provider })
+      if (p !== undefined && p !== null) out.request = copy(p)
+    }
   }
   if (c.events) {
     out.events = []
