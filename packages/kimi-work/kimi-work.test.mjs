@@ -105,3 +105,15 @@ test('desktop import is read-only and never substitutes a Code endpoint', () => 
     expect(() => I.readDesktop(file)).toThrow();
   } finally {fs.rmSync(dir, {recursive: true, force: true});}
 });
+
+test('the Work token goes only to the official Work chat endpoint', async () => {
+  let called = 0;
+  const p = I.createPlugin({readSession: () => session, fetchImpl: async () => {called++; return new Response('{}');}});
+  const loader = await p.auth.loader(async () => auth);
+  for (const url of ['https://example.invalid/coding/v1/chat/completions', I.BASE + '/models',
+    I.BASE + '/chat/completions?x=1', 'https://user:pw@agent-gw.kimi.com/coding/v1/chat/completions']) {
+    await expect(loader.fetch(url, {method: 'POST', body: '{}'})).rejects.toThrow('仅接受官方');
+  }
+  await expect(loader.fetch(I.BASE + '/chat/completions', {method: 'GET'})).rejects.toThrow('仅接受官方');
+  expect(called).toBe(0);
+});
