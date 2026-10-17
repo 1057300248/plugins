@@ -1618,6 +1618,73 @@ const makePlugin = (site) => async ({ client }) => {
     }
   }
 
+  // checkin claims the daily credits through the same campaigns page as
+  // Qoder's client. A campaign already claimed is done; one not available
+  // is inactive, never an error that magpie would retry all day.
+  const checkin = async (getAuth) => {
+    let cred
+    try {
+      cred = await fresh(getAuth)
+    } catch (e) {
+      return { outcome: "failed", message: e?.message ?? String(e), ...(e?.expired ? { signIn: "expired" } : {}) }
+    }
+    const base = campaignTarget(site, siteOf(site, cred), site.openapi + CAMPAIGNS)
+    if (!base) return { outcome: "inactive", message: "no campaigns page for this account" }
+    try {
+      const machine = site.id === "qoder" ? await machineForCampaign(cred.uid) : {}
+      const call = async (url, method, body) => {
+        let res = await campaignCall(url, method, body, cred.deviceToken, machine)
+        if (res.status === 401 || res.status === 403) {
+          const token = await deviceToken(getAuth, cred.deviceToken)
+          const current = latest(await getAuth())
+          cred = { ...current, deviceToken: token }
+          res = await campaignCall(url, method, body, token, machine)
+        }
+        return res
+      }
+      const listRes = await call(base, "GET")
+      let list = {}
+      let listRaw = ""
+      try {
+        listRaw = await listRes.text()
+        list = JSON.parse(listRaw) ?? {}
+      } catch {
+        return { outcome: "failed", message: `campaigns: unreadable reply ${listRaw.trim().slice(0, 120) || "(empty)"}` }
+      }
+      if (listRes.status !== 200) return { outcome: "failed", message: `campaigns: HTTP ${listRes.status}` }
+      const now = Date.now()
+      const active = (c) => (!c.startAt || c.startAt * 1000 <= now) && (!c.endAt || c.endAt * 1000 > now)
+      const campaigns = (Array.isArray(list.campaigns) ? list.campaigns : []).filter((x) => x?.actionType === "CLAIM_BENEFIT")
+      const campaign = campaigns.find((x) => x.claimStatus === "CLAIMABLE")
+      if (!campaign) {
+        const done = campaigns.find((x) => x.claimStatus === "CLAIMED" && active(x))
+        if (done) {
+          const amount = Number(done.benefit?.amount)
+          return { outcome: "done", ...(Number.isFinite(amount) && amount > 0 ? { credit: amount } : {}) }
+        }
+        return campaigns.length ? { outcome: "failed", message: "campaigns: today's credits aren't offered yet" } : { outcome: "inactive" }
+      }
+      const claimRes = await call(base.replace(/\/$/, "") + "/" + encodeURIComponent(campaign.campaignId) + "/claim", "POST", "{}")
+      let claim = {}
+      let claimRaw = ""
+      try {
+        claimRaw = await claimRes.text()
+        claim = JSON.parse(claimRaw) ?? {}
+      } catch {
+        return { outcome: "failed", message: `claim: unreadable reply ${claimRaw.trim().slice(0, 120) || "(empty)"}` }
+      }
+      const said = claim?.status ?? claim?.data?.status
+      if (claimRes.status !== 200) return { outcome: "failed", message: `claim: HTTP ${claimRes.status}` }
+      if (said === "CLAIMED") {
+        const amount = Number(claim?.benefit?.amount ?? claim?.data?.benefit?.amount ?? campaign.benefit?.amount)
+        return { outcome: "claimed", ...(Number.isFinite(amount) && amount > 0 ? { credit: amount } : {}) }
+      }
+      return { outcome: "failed", message: `claim: ${said || "unknown answer"}` }
+    } catch (e) {
+      return { outcome: "failed", message: e?.message ?? String(e), ...(e?.expired ? { signIn: "expired" } : {}) }
+    }
+  }
+
   const signedInError = (e) =>
     errorResponse({
       status: e instanceof SignInGone ? 401 : 502,
@@ -1774,6 +1841,7 @@ const makePlugin = (site) => async ({ client }) => {
           : []),
       ],
       usage,
+      checkin,
     },
     async config(config) {
       config.provider ??= {}

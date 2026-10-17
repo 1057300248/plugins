@@ -201,7 +201,10 @@ The hosts and reply shapes come from a real VPC account's report
 Qoder gives credits for a daily claim (the Qoder client's campaign
 `CLAIM_BENEFIT`, 100 Credits a day as reported), on both sites. magpie can
 claim it for each account when its Qoder check-in switch is on
-(Settings). It asks these pages through this plugin's fetch (since 0.2.7),
+(Settings), through `auth.checkin`: an already claimed campaign is `done`,
+a campaign not available is `inactive`, and a claimable one is `claimed`
+with its benefit amount. It asks these pages through this plugin's own
+campaigns path (since 0.2.7),
 which sends them as the account, on the device token (`Bearer`,
 `Cosy-ClientType: 10`) as usage is read; a refused device token is
 rotated once and the page asked again.
