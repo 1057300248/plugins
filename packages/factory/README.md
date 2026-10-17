@@ -128,9 +128,14 @@ The fixed Claude identity is recognized as a complete first line too when
 magpie joins it with the following system instructions into one text block.
 
 For the built-in `update-config` skill, the adapter changes only the known
-self-reference "not Claude" to "not the assistant" inside a complete
-generated skill-list reminder. Its configuration instructions, other
-skill descriptions, tools and caller text are preserved.
+self-reference "not Claude" to "not the assistant" inside that skill's entry
+in a generated skill list. Claude Code renders the entry two ways: as a
+system message (`- update-config: …`) and, in the `claude-code-guide` agent's
+own system prompt under `# User's Current Configuration`, with the slash that
+invokes it (`- /update-config: …`). Both spellings are adapted, and only the
+sentence Factory refuses changes, so the entry's name and the rest of the list
+stay. Its configuration instructions, other skill descriptions, tools and
+caller text are preserved.
 
 Claude 5 can send runtime metadata in string-content `system` messages
 instead of user-message reminders. The plugin adapts the known environment,

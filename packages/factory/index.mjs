@@ -953,11 +953,29 @@ const CLAUDE_IDENTITIES = new Set([
 const ENV_REMINDER = /^<system-reminder>\n# Environment\nYou have been invoked in the following environment:[ \t]*\n(?: {1,2}- [^\n]*\n)+<\/system-reminder>$/
 const MODEL_REMINDER = /^<system-reminder>\nYou are powered by the model (?:named )?[^\n<>]+\.\n<\/system-reminder>$/
 const SKILL_REMINDER = /^<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n(?:(?!<\/?system-reminder>)[\s\S])*\n<\/system-reminder>$/
-// Factory also refuses this fixed self-reference in Claude Code 2.1.287's
-// built-in update-config description. Keep its instructions and the rest
-// of the skill list intact; only the known line in a complete listing changes.
-const CONFIG_SKILL_METADATA = '- update-config: Use this skill to configure the Claude Code harness via settings.json. Automated behaviors ("from now on when X", "each time X", "whenever X", "before/after X") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them.'
-const CONFIG_SKILL_COMPAT = CONFIG_SKILL_METADATA.replace("not Claude", "not the assistant")
+// Factory also refuses this fixed self-reference in Claude Code's built-in
+// update-config description. Keep its instructions and the rest of the skill
+// list intact; only that entry changes.
+//
+// Claude Code renders the entry two ways: as a system message ("- update-
+// config: …") and, in the claude-code-guide agent's own system prompt under
+// "# User's Current Configuration", with the slash that invokes it
+// ("- /update-config: …"). Match the entry by its name in either spelling and
+// change only the refused sentence in it, so a rewording of the rest of the
+// description cannot defeat the match. The sentence is the built-in
+// description's own text, so no other entry carries it by accident.
+const CONFIG_SKILL_ENTRY = /^- \/?update-config: /
+const CONFIG_SKILL_REFUSED = "the harness executes these, not Claude, so memory/preferences cannot fulfill them."
+const CONFIG_SKILL_SAFE = CONFIG_SKILL_REFUSED.replace("not Claude", "not the assistant")
+
+// configSkillText repairs that entry wherever the text carries a skill list.
+function configSkillText(text) {
+  if (!text.includes(CONFIG_SKILL_REFUSED)) return text
+  return text
+    .split("\n")
+    .map((line) => (CONFIG_SKILL_ENTRY.test(line) ? line.replace(CONFIG_SKILL_REFUSED, CONFIG_SKILL_SAFE) : line))
+    .join("\n")
+}
 
 // Claude Code also sends the skill list alone as a system message: the
 // entries only, no header, no <system-reminder> wrapper and no token tail,
@@ -965,7 +983,7 @@ const CONFIG_SKILL_COMPAT = CONFIG_SKILL_METADATA.replace("not Claude", "not the
 // list (it opens with an entry) changes, and in it only the known line.
 function bareSkills(text) {
   if (!text.startsWith("- ")) return text
-  return ("\n" + text).replace("\n" + CONFIG_SKILL_METADATA, "\n" + CONFIG_SKILL_COMPAT).slice(1)
+  return configSkillText(text)
 }
 
 // Claude 5 also sends its runtime metadata as a string-content system
@@ -1018,7 +1036,7 @@ function announcedSkills(text) {
     const list = parts[i + 1]
     // Skill descriptions can contain continuation lines.
     if (!list.startsWith("- ")) continue
-    parts[i + 1] = ("\n" + list).replace("\n" + CONFIG_SKILL_METADATA, "\n" + CONFIG_SKILL_COMPAT).slice(1)
+    parts[i + 1] = configSkillText(list)
   }
   return parts.join("\n\n")
 }
@@ -1069,7 +1087,7 @@ function announcedContext(text, start = 1) {
     } else if (SYSTEM_MODEL_UPDATE.test(part)) {
       parts[i] = systemModelLine(part)
     } else if (parts[i - 1] === "The following skills are available for use with the Skill tool:") {
-      parts[i] = ("\n" + part).replace("\n" + CONFIG_SKILL_METADATA, "\n" + CONFIG_SKILL_COMPAT).slice(1)
+      parts[i] = configSkillText(part)
     }
   }
   return parts.join("\n\n")
@@ -1123,7 +1141,7 @@ function generatedContext(text) {
   const skills = out.indexOf(skillHeader)
   if (skills >= 0) {
     const start = skills + skillHeader.length - 1
-    out = out.slice(0, start) + out.slice(start).replace("\n" + CONFIG_SKILL_METADATA, "\n" + CONFIG_SKILL_COMPAT)
+    out = out.slice(0, start) + configSkillText(out.slice(start))
   }
   return out
 }
@@ -1302,7 +1320,7 @@ function claudeIdentity(text) {
 
 // promptText adapts a system prompt's text.
 function promptText(text) {
-  return clientOpening(systemModelLine(claudeIdentity(text)))
+  return configSkillText(clientOpening(systemModelLine(claudeIdentity(text))))
 }
 
 // systemMessageText adapts a system message's text after the prompt.
@@ -1327,7 +1345,7 @@ function userBlockText(text) {
       .replace("The exact model ID is", "Model ID:")
       .replace("Assistant knowledge cutoff is", "Model knowledge cutoff:")
   }
-  if (SKILL_REMINDER.test(text)) return text.replace("\n" + CONFIG_SKILL_METADATA, "\n" + CONFIG_SKILL_COMPAT)
+  if (SKILL_REMINDER.test(text)) return configSkillText(text)
   return text
 }
 
