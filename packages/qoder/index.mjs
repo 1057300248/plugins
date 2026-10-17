@@ -799,16 +799,26 @@ function failure(status, text) {
   let code = ""
   let queue
   try {
-    const j = JSON.parse(text)
+    let j = JSON.parse(msg)
+    // #167: an HTTP/message wrapper can hold the actual 10605 body.
+    // Unwrap only that known queue code; a real auth/credit/request code
+    // on the outer body remains authoritative.
+    const outerCode = j?.code == null ? "" : String(j.code)
+    if (["", "401", "403"].includes(outerCode) && typeof j?.message === "string") {
+      try {
+        const inner = JSON.parse(j.message.trim())
+        if (inner && !Array.isArray(inner) && String(inner.code) === QUEUED) j = inner
+      } catch {}
+    }
     code = j?.code == null ? "" : String(j.code)
     if (j?.message) msg = String(j.message)
     // details is a JSON string, or the object itself (gjson reads either)
-    const d = typeof j?.details === "string" ? JSON.parse(j.details) : j?.details
+    const d = typeof j?.details === "string" ? JSON.parse(j.details.trim()) : j?.details
     if (d?.error?.message) msg += ": " + d.error.message
     // the queue's state: the message itself, as a JSON string, or a field
     queue = j?.queue && typeof j.queue === "object" ? j.queue : undefined
     if (!queue && typeof j?.message === "string" && j.message.trim().startsWith("{")) {
-      const q = JSON.parse(j.message)
+      const q = JSON.parse(j.message.trim())
       if (q && typeof q === "object" && ("isQueued" in q || "serviceAvailable" in q || "retryAfterSeconds" in q)) queue = q
     }
   } catch {}
@@ -1029,7 +1039,7 @@ async function* events(body) {
     if (inner.trim() === "[DONE]") break
     let chunk
     try {
-      chunk = JSON.parse(inner)
+      chunk = JSON.parse(inner.trim())
     } catch {
       continue
     }
