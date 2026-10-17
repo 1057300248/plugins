@@ -296,8 +296,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // device is the machine an account signs in from, made once at sign-in and
 // named to trae.cn's authorization page, then sent with every request: a
-// fresh one each time is what the relays saw requests dropped for.
-const newDevice = () => ({ deviceId: digits(19), machineId: randomBytes(16).toString("hex"), ...newDeviceKey() })
+// fresh one each time is what the relays saw requests dropped for. Trae
+// CN's id has the shape its clients' have, 16 digits: the device service
+// gives the IDE a 15- or 16-digit one (iCubeAuthInfo://icube-dc:<id>, see
+// clientDevice), and Trae CN answers a check-in claim on a 19-digit id
+// 9074 where the same account and token on a 16-digit one are taken
+// (magpie-community/plugins#194). Trae's global site keeps the 19 digits
+// it was signed in with: nothing says its ids are shaped otherwise.
+const newDevice = (site) => ({ deviceId: digits(site?.id === "trae-cn" ? 16 : 19), machineId: randomBytes(16).toString("hex"), ...newDeviceKey() })
+
+// ugDevice is the device id a Trae CN account's check-in goes on when this
+// machine's client isn't signed in as it: its own when that already has a
+// client's shape (15 or 16 digits), else, for an account signed in before
+// 0.2.16 with 19 digits, a 16-digit id made from its own device id and
+// uid. That one is the same on every check-in of the account, never
+// rotated and never another account's: it is the account's own device in
+// the shape Trae CN takes (#194), not a new device to get past a refusal,
+// and a 9095 (this device is in for today) on it stays the day's answer.
+// The chat's pages and the renewal keep the device the account signed in
+// with.
+function ugDevice(a) {
+  const id = String(a.deviceId ?? "")
+  if (/^\d{15,16}$/.test(id)) return id
+  if (!id && !a.uid) return id
+  const n = BigInt("0x" + createHash("sha256").update(`trae-cn-device\0${id}\0${a.uid ?? ""}`).digest("hex").slice(0, 30))
+  return String(1_000_000_000_000_000n + (n % 9_000_000_000_000_000n))
+}
 
 // newDeviceKey is the device's key pair, an ECDSA P-256 one as the clients
 // keep (iCubeAuthInfo://icube-dc:<device>), whose public half goes with a
@@ -627,7 +651,7 @@ async function signedIn(q, device, site) {
 // browserSignIn is the IDE's sign-in: trae.cn's authorization page, back
 // to a callback on 127.0.0.1 (the page takes no other kind)
 async function browserSignIn(site) {
-  const device = newDevice()
+  const device = newDevice(site)
   const trace = randomUUID()
   let over = false
   let settle
@@ -2491,6 +2515,9 @@ const makePlugin = (site) => async ({ client }) => {
     // other account keeps its own device; none is given the client's.
     const deviceId = ug && site.id === "trae-cn" ? await clientDevice(a.uid) : undefined
     const own = deviceId ? { deviceId, ...thisMachine() } : undefined
+    // every other Trae CN account checks in on its own device, in the
+    // client's shape (ugDevice, #194)
+    if (ug && site.id === "trae-cn" && !own) a = { ...a, deviceId: ugDevice(a) }
     const res = await fetch(url, {
       method,
       headers: ug ? ugHeaders(a, site, { Accept: "application/json" }, own) : ideHeaders(a, site, { Accept: "application/json" }),
@@ -2861,4 +2888,4 @@ const makePlugin = (site) => async ({ client }) => {
 export const TraeCNAuthPlugin = makePlugin(SITES["trae-cn"])
 export const TraeGlobalAuthPlugin = makePlugin(SITES["trae-global"])
 
-export const _internal = { ownClient, clientStoragePaths, clientDevice, clientDecode, thisMachine, traeHost, accountOf, HOSTS: SITES["trae-cn"].hosts, MODELS: SITES["trae-cn"].models, TextTools, NativeCalls, looseJSON, glmCall, nameCall, toolNamed, unwrapped, traeMessages, chatBody, credits, dollarUsageOf, whenOf, newDevice, proofOf, SITES, SESSION, conversationID }
+export const _internal = { ownClient, clientStoragePaths, clientDevice, clientDecode, thisMachine, traeHost, accountOf, HOSTS: SITES["trae-cn"].hosts, MODELS: SITES["trae-cn"].models, TextTools, NativeCalls, looseJSON, glmCall, nameCall, toolNamed, unwrapped, traeMessages, chatBody, credits, dollarUsageOf, whenOf, newDevice, ugDevice, proofOf, SITES, SESSION, conversationID }

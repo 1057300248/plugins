@@ -59,8 +59,10 @@ async function checkIn(auth = signedIn()) {
   return f.seen.at(-1).headers
 }
 
-const plugins = (h) => {
-  expect(h.get("x-device-id")).toBe("1234567890123456789")
+// the account's own device, in the client's shape (ugDevice, #194)
+const plugins = (h, a = signedIn()) => {
+  expect(h.get("x-device-id")).toBe(_internal.ugDevice(a))
+  expect(h.get("x-device-id")).toMatch(/^\d{16}$/)
   expect(h.get("x-device-brand")).toBeTruthy()
   expect(h.get("x-device-type")).toBe("Windows")
   expect(h.get("x-os-version")).toBe("10.0.22631")
@@ -96,7 +98,7 @@ test("an account the client isn't signed in as keeps its own device", async () =
 
 test("an account with no uid keeps its own device", async () => {
   client("")
-  plugins(await checkIn(signedIn({ uid: "" })))
+  plugins(await checkIn(signedIn({ uid: "" })), signedIn({ uid: "" }))
 })
 
 test("a client with no single device names none", async () => {
