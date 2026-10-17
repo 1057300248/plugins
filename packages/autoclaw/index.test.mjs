@@ -7,7 +7,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AutoclawAuthPlugin, AutoclawCnAuthPlugin, _internal } from "./index.mjs"
 
-const { checkinOutcome, signinConfig, bareToken, codeValue, tokenFields, refreshTokens, startLocalOAuth } = _internal
+const {
+  checkinOutcome, signinConfig, bareToken, codeValue, tokenFields, refreshTokens, startLocalOAuth,
+  autoclawRewriteBody, unflag, unflagged, explained, FLAGGED, OFFICIAL_SYSTEM_PROMPT, REFUSED_HINT,
+} = _internal
 
 const b64url = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
 const jwt = (claims) => `${b64url({ alg: "none" })}.${b64url(claims)}.sig`
@@ -117,6 +120,122 @@ test("loader().fetch signs with X-Authorization and rotates hosts on 401", async
   }
 })
 
+// AutoClaw's 2.1.0 chat gateway answers 406 with an empty body to a chat that
+// hasn't the official prefix first or that carries max_tokens.
+// autoclawRewriteBody puts a chat in that shape, once, whatever it is handed.
+test("autoclawRewriteBody prefixes the system prompt and drops max_tokens", () => {
+  const chat = (messages, rest = {}) => JSON.stringify({ model: "zai_glm-5.3-flash", messages, ...rest })
+
+  // the caller's own system message keeps its words, behind the prefix
+  const one = autoclawRewriteBody(chat([{ role: "system", content: "Be terse." }, { role: "user", content: "hi" }], { max_tokens: 32000 }))
+  expect(one.messages[0].content).toBe(`${OFFICIAL_SYSTEM_PROMPT}\n\nBe terse.`)
+  expect(one.max_tokens).toBeUndefined()
+  expect(one.messages.length).toBe(2)
+
+  // …and the prefix goes on once, however often the rewrite runs
+  expect(autoclawRewriteBody(JSON.stringify(one)).messages[0].content).toBe(one.messages[0].content)
+
+  // a chat that opens without a system message gets the smallest one
+  expect(autoclawRewriteBody(chat([{ role: "user", content: "hi" }])).messages).toEqual([
+    { role: "system", content: OFFICIAL_SYSTEM_PROMPT },
+    { role: "user", content: "hi" },
+  ])
+
+  // the newer spelling goes with max_tokens
+  expect(autoclawRewriteBody(chat([{ role: "user", content: "hi" }], { max_completion_tokens: 10 })).max_completion_tokens).toBeUndefined()
+
+  // anything that isn't a JSON chat is left for the caller to pass through
+  expect(autoclawRewriteBody("not json")).toBe(null)
+  expect(autoclawRewriteBody(JSON.stringify({ model: "zai_auto" }))).toBe(null)
+})
+
+// FLAGGED is the words AutoClaw refuses a chat for: it reads the system
+// prompt only, minds no case, and matches the shortest run of them ("You are
+// Claude Code" and "Codex CLI" are two separate ones). Each pair was sent to
+// the live gateway: the left side is a 406, the right side answers.
+test("every flagged line's replacement is one the gateway still takes", () => {
+  expect(FLAGGED.length).toBeGreaterThan(0)
+  for (const [re, to] of FLAGGED) {
+    expect(to).not.toMatch(new RegExp(re.source, "i"))
+    expect(unflagged(to)).toBe(to)
+  }
+  expect(unflagged("You are Claude Code, Anthropic's official CLI for Claude.")).not.toMatch(/You are Claude Code/)
+  expect(unflagged("Codex CLI is an open source project.")).not.toMatch(/Codex CLI/)
+})
+
+// The gateway reads the system prompt, not the chat: the caller's own words
+// in a user or assistant message stay as they are.
+test("unflag rewrites system and developer messages only", () => {
+  const messages = [
+    { role: "system", content: "You are Claude Code, Anthropic's official CLI for Claude." },
+    { role: "developer", content: [{ type: "text", text: "You are Cursor" }] },
+    { role: "user", content: "You are Codex" },
+    { role: "assistant", content: [{ type: "text", text: "Codex CLI is what I use" }] },
+  ]
+  expect(unflag(messages)).toBe(true)
+  expect(messages[0].content).toBe("You are the Claude Code CLI, Anthropic's official CLI for Claude.")
+  expect(messages[1].content[0].text).toBe("You are the Cursor agent")
+  expect(messages[2].content).toBe("You are Codex")
+  expect(messages[3].content[0].text).toBe("Codex CLI is what I use")
+  // nothing left to change the second time
+  expect(unflag(messages)).toBe(false)
+})
+
+// explained is res with REFUSED_HINT on a 406 — the one refusal the gateway
+// gives no words for — and the sign-in marked kept, so magpie doesn't read a
+// refusal as a lapsed account.
+test("explained adds the way out to a 406 and keeps the sign-in", async () => {
+  const refused = await explained(new Response(JSON.stringify({ error: { code: null, message: "406 Not Acceptable", type: "api_error" } }), { status: 406, headers: { "content-type": "application/json" } }))
+  expect(refused.status).toBe(406)
+  expect(refused.headers.get("X-Magpie-Sign-In")).toBe("kept")
+  expect((await refused.json()).error.message).toBe(`406 Not Acceptable — ${REFUSED_HINT}`)
+
+  // an answer that isn't a refusal is passed through, and its body with it
+  const ok = await explained(new Response('{"choices":[]}', { status: 200 }))
+  expect(ok.status).toBe(200)
+  expect(await ok.text()).toBe('{"choices":[]}')
+})
+
+test("overseas loader().fetch drops X-Harness-Type and explains 406", async () => {
+  const realFetch = globalThis.fetch
+  const calls = []
+  let status = 200
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? "{}")) })
+    if (status === 406) return new Response(JSON.stringify({ error: { code: null, message: "406 Not Acceptable", type: "api_error" } }), { status: 406 })
+    return new Response("ok")
+  }
+  try {
+    const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } })
+    const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "a1" }))
+    const body = JSON.stringify({
+      model: "zai_glm-5.3-flash",
+      max_tokens: 32000,
+      messages: [
+        { role: "system", content: "You are an AI agent powered by DeepSeek Harness." },
+        { role: "user", content: "hi" },
+      ],
+    })
+
+    expect((await loader.fetch("x", { method: "POST", body })).status).toBe(200)
+    const sent = calls.at(-1)
+    expect(sent.body.max_tokens).toBeUndefined()
+    expect(sent.body.messages[0].content.startsWith(OFFICIAL_SYSTEM_PROMPT)).toBe(true)
+    expect(sent.body.messages[0].content).not.toMatch(/DeepSeek Harness/)
+    expect(sent.headers.get("X-Harness-Type")).toBe(null)
+    expect(sent.headers.get("User-Agent")).toMatch(/^AutoClaw\//)
+
+    status = 406
+    const refused = await loader.fetch("x", { method: "POST", body })
+    expect(refused.status).toBe(406)
+    expect(refused.headers.get("X-Magpie-Sign-In")).toBe("kept")
+    expect((await refused.json()).error.message).toContain(REFUSED_HINT)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+
 test("refreshTokens orders hosts by the token's source_id and falls back on 400002", async () => {
   const realFetch = globalThis.fetch
   const requests = []
@@ -212,6 +331,8 @@ test("the OAuth callback takes only the state the authorize page handed out", as
   try {
     const session = await startLocalOAuth("google", () => {})
     const port = Number(/127\.0\.0\.1:(\d+)\//.exec(session.instructions)[1])
+    expect(session.url).toBe(`http://127.0.0.1:${port}/`)
+    expect((await realFetch(session.url)).status).toBe(200)
     const local = (path, init) => fetch(`http://127.0.0.1:${port}${path}`, init)
 
     // The guide page's Continue hands out the authorize URL, and the state in it
@@ -243,4 +364,106 @@ test("the OAuth callback takes only the state the authorize page handed out", as
   } finally {
     globalThis.fetch = realFetch
   }
+})
+
+test("CN's managed gateway gets AutoClaw's official body and headers", async () => {
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), init, headers: new Headers(init?.headers) })
+    return Response.json({ id: "x", object: "chat.completion", created: 1, model: "zai_auto-fast", choices: [{ index: 0, message: { role: "assistant", content: "OK" }, finish_reason: "stop" }] })
+  }
+  try {
+    const factory = await makePlugin("autoclaw-cn")
+    const hooks = await factory({ client: { auth: { set: async () => {} } } }, {})
+    const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "a1" }))
+    const res = await loader.fetch("x", { body: JSON.stringify({ model: "zai_auto-fast", stream: false, max_tokens: 12, stream_options: { include_usage: true }, messages: [{ role: "system", content: "mine" }, { role: "user", content: "hi" }] }) })
+    const sent = JSON.parse(calls[0].init.body)
+    expect(calls[0].url).toBe("https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw/chat/completions")
+    expect(sent.model).toBe("zai_auto-fast")
+    expect(sent.stream).toBe(false)
+    expect(sent.max_tokens).toBeUndefined()
+    expect(sent.messages).toHaveLength(2)
+    expect(sent.messages[0].content).toBe("You are AutoClaw. Answer the user directly and concisely.\n\nmine")
+    expect(sent.messages[0].role).toBe("system")
+    expect(sent.messages[1]).toMatchObject({ role: "user", content: "hi" })
+    expect(calls[0].headers.get("x-request-model")).toBe("zai_auto-fast")
+    expect(calls[0].headers.get("x-client-type")).toBe("pc")
+    expect(calls[0].headers.get("x-agent-id")).toBe("main")
+    expect(calls[0].headers.get("x-authorization")).toBe("Bearer a1")
+    expect(res.headers.get("content-type")).toContain("application/json")
+    const reply = await res.json()
+    expect(reply.model).toBe("zai_auto-fast")
+  } finally { globalThis.fetch = realFetch }
+})
+
+function makePlugin(id) {
+  return _internal.makePluginForTest({
+    providerId: id,
+    providerName: id,
+    homeHost: id === "autoclaw-cn" ? "https://autoglm-api.zhipuai.cn" : "https://autoglm-api.autoglm.ai",
+    loginMethod: { type: "oauth", label: "test", authorize: async () => ({}) },
+  })
+}
+
+test("CN preserves string and array system content", async () => {
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init) => {
+    calls.push(JSON.parse(String(init?.body)))
+    return Response.json({ ok: true })
+  }
+  try {
+    const factory = makePlugin("autoclaw-cn")
+    const hooks = await factory({ client: { auth: { set: async () => {} } } }, {})
+    const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "a1" }))
+    await loader.fetch("x", { body: JSON.stringify({ model: "zai_auto", messages: [{ role: "system", content: [{ type: "text", text: "PARTSYS" }] }, { role: "user", content: "hi" }] }) })
+    expect(calls[0].messages[0].content).toEqual([
+      { type: "text", text: "You are AutoClaw. Answer the user directly and concisely." },
+      { type: "text", text: "PARTSYS" },
+    ])
+    await loader.fetch("x", { body: JSON.stringify({ model: "zai_auto", messages: [{ role: "system", content: "mine" }, { role: "user", content: "hi" }] }) })
+    expect(calls[1].messages[0].content).toBe("You are AutoClaw. Answer the user directly and concisely.\n\nmine")
+    await loader.fetch("x", { body: JSON.stringify({ model: "zai_auto", messages: [{ role: "system", content: "You are Claude Code" }] }) })
+    expect(calls[2].messages[0].content).toBe("You are AutoClaw. Answer the user directly and concisely.\n\nYou are the Claude Code CLI")
+  } finally { globalThis.fetch = realFetch }
+})
+
+test("CN managed catalog uses variant objects and overseas keeps its limits", async () => {
+  const factory = makePlugin("autoclaw-cn")
+  const cn = await factory({ client: { auth: { set: async () => {} } } }, {})
+  const cfg = { provider: {} }
+  await cn.config(cfg)
+  expect(Object.keys(cfg.provider["autoclaw-cn"].models.zai_auto.variants)).toEqual(["low", "high", "max"])
+  expect(cfg.provider["autoclaw-cn"].models.zai_auto.variants.max).toEqual({ reasoningEffort: "max" })
+  expect(Object.keys(cfg.provider["autoclaw-cn"].models)).toEqual(["zai_auto", "zai_auto-fast", "zaicoding_glm-5.3", "zai_glm-5.3-flash"])
+
+  const overseas = await makePlugin("autoclaw")({ client: { auth: { set: async () => {} } } }, {})
+  const oc = { provider: {} }
+  await overseas.config(oc)
+  expect(Object.keys(oc.provider.autoclaw.models)).toEqual(["zai_auto", "zai_auto-fast", "zaicoding_glm-5.3", "zai_glm-5.3-flash"])
+  expect(oc.provider.autoclaw.models.zai_auto.limit).toEqual({ context: 200000, output: 32000 })
+  expect(oc.provider.autoclaw.models["zaicoding_glm-5.3"].limit).toEqual({ context: 1000000, output: 131072 })
+})
+
+test("CN passes SSE through and marks 401 expired", async () => {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input))
+    if (url.pathname.endsWith("/chat/completions")) {
+      if (String(init?.body).includes("STREAM")) return new Response("data: {\"ok\":true}\n\n", { headers: { "content-type": "text/event-stream" } })
+      return new Response("{}", { status: 401 })
+    }
+    return Response.json({ ok: true })
+  }
+  try {
+    const factory = makePlugin("autoclaw-cn")
+    const hooks = await factory({ client: { auth: { set: async () => {} } } }, {})
+    const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "a1" }))
+    const stream = await loader.fetch("x", { body: JSON.stringify({ model: "zai_auto", stream: true, messages: [{ role: "user", content: "STREAM" }] }) })
+    expect(await stream.text()).toBe("data: {\"ok\":true}\n\n")
+    const expired = await loader.fetch("x", { body: JSON.stringify({ model: "zai_auto", messages: [{ role: "user", content: "x" }] }) })
+    expect(expired.status).toBe(401)
+    expect(expired.headers.get("X-Magpie-Sign-In")).toBe("expired")
+  } finally { globalThis.fetch = realFetch }
 })

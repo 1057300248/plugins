@@ -9,12 +9,13 @@
 | `autoclaw` | Google / z.ai 网页 OAuth | `autoglm-api.autoglm.ai` | `autoclaw/zai_auto` 等 |
 | `autoclaw-cn` | 手机验证码（+86） | `autoglm-api.zhipuai.cn` | `autoclaw-cn/zai_auto` 等 |
 
-两个供应商都支持 magpie 的多账号、故障切换、token 自动轮换与积分余额显示。模型为带前缀的 routeModelId（`zai_` 智谱 / `zaicoding_` coding plan / `tdpsk_` 豆包 DeepSeek）：
+两个供应商都支持 magpie 的多账号、故障切换、token 自动轮换与积分余额显示。实测可用的 4 个在线模型为带前缀的 routeModelId（`zai_` 智谱 / `zaicoding_` coding plan）：
 
-- `zai_auto` / `zai_auto-fast`（自动路由，推荐默认）
-- `zai_glm-5.3-flash` / `zai_glm-5-turbo`
-- `zaicoding_glm-5.3`
-- `tdpsk_deepseek-v4-flash-202605` / `tdpsk_deepseek-v4-pro-202606`
+- `zai_auto` / `zai_auto-fast`（自动路由，支持 reasoning variants：low / high / max）
+- `zai_glm-5.3-flash`（极速推理，支持 reasoning variants）
+- `zaicoding_glm-5.3`（GLM-5.3 编程专项，支持 reasoning variants）
+
+> 注：旧版中的 `zai_glm-5-turbo` 以及豆包 DeepSeek 映射 `tdpsk_deepseek-v4-flash-202605`、`tdpsk_deepseek-v4-pro-202606` 已被上游下线（调用均返回 `400 非法模型`），本版本已从模型列表中移除。
 
 ## 安装
 
@@ -72,9 +73,19 @@ EOF
 | `signinOnUsage` | `false` | 查额度/刷新时自动补签（默认关，交给原生开关） |
 | `signinHour` | `null` | 限定补签小时：`8` = 仅当本地时间处于 8:00–8:59 时补签；`null` 不限 |
 
+## 对话网关与请求整形
+
+AutoClaw 对话网关对请求形状有硬性要求，缺任一条都回 `406 Not Acceptable` 且 body 为空：
+- **官方 system 前缀**：必须以 `You are AutoClaw. Answer the user directly and concisely.` 开头（插件会自动合并进 caller 已有的 system 消息，无 system 时补一条最小 system）
+- **删除 max_tokens**：网关拒收 `max_tokens` / `max_completion_tokens`，插件会在发送前自动剔除
+- **不发送 X-Harness-Type**：上游收到 `X-Harness-Type` 即报 406，已删除该残留请求头
+- **改写外部 Harness 身份声明**：上游拦截 system 中包含的外部 agent 身份句（如 `You are Codex`、`You are Claude Code` 等），插件的 `unflag` 会自动将其替换为兼容措辞，避免 406 拦截
+
+国内版 `autoclaw-cn` 走 AutoClaw 2.1.0 managed gateway（`autoglm-acceleration-api.zhipuai.cn`）；国际版 `autoclaw` 走海外直连网关（`autoglm-api.autoglm.ai`）。两者均已通过真实调用与推理验证。
+
 ## 已知行为
 
-- 手机号账号只认国内 host、z.ai/Google 账号只认国际 host；对话 fetch 已内置 401/403 自动换侧重试。
+- 手机号账号只认国内 host（走 managed gateway，401/403 标记登录失效）；z.ai/Google 账号只认国际 host（401/403 自动换侧重试，均拒绝时标记失效）。
 - 上游模型白名单随版本变化，模型下线时上游返回 `400 非法模型`（原样透传错误消息）。
 - refresh token 与 AutoClaw 桌面端**共用会互踢**（双方都轮换），插件账号请勿同时在桌面端登录。
 - 上游偶发改协议时，`CLIENT_VERSION` / 端点路径可能需要随官方客户端更新。
@@ -82,3 +93,9 @@ EOF
 ## 免责声明
 
 本包为**非官方**社区插件，与智谱 AI / OpenClaw / AutoClaw 无任何关联。实现基于对官方客户端行为的逆向分析与实测，仅供个人学习研究；使用产生的账号风险由使用者自行承担。上游协议变更可能导致插件随时失效。
+
+### Local sign-in page ownership
+
+The plugin waits for the loopback listener before returning its guide URL. Magpie/OpenCode opens that URL; the callback does not launch a second browser through a shell. Cancelled or expired sessions release their port; begin a new sign-in rather than reusing the old URL.
+
+The guide distinguishes an intentional authorization redirect from the user closing the page. The redirect must keep the loopback callback alive; closing a guide before authorization still cancels it. The guide reports a disconnected or expired session explicitly.

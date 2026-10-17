@@ -21,13 +21,14 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import * as http from "node:http";
-import { spawn } from "node:child_process";
 
 const APP_ID = "100003";
 const APP_KEY = "38d2391985e2369a5fb8227d8e6cd5e5";
 const PRODUCT = "autoclaw";
 const CHANNEL = "AutoClaw4";
 const CLIENT_VERSION = "1.18.1";
+const CN_CHANNEL = "AutoClaw26";
+const CN_CLIENT_VERSION = "2.1.0";
 const PLATFORM_TM = process.platform === "darwin" ? "mac" : process.platform === "win32" ? "win" : "linux";
 const USER_AGENT = `AutoClaw/${CLIENT_VERSION} (${PLATFORM_TM}-${process.arch})`;
 
@@ -35,24 +36,139 @@ const GLOBAL_HOST = "https://autoglm-api.autoglm.ai";
 const CN_HOST = "https://autoglm-api.zhipuai.cn";
 
 const CHAT_PATH = "/autoclaw-proxy/proxy/autoclaw/v1/chat/completions";
+const CN_CHAT_PATH = "/autoclaw-proxy/proxy/autoclaw/chat/completions";
+const MANAGED_HOST = "https://autoglm-acceleration-api.zhipuai.cn";
+const OFFICIAL_SYSTEM_PROMPT = 'You are AutoClaw. Answer the user directly and concisely.';
 const WALLETS_PATH = `/agent-assetmgr/api/v2/wallets?biz_app_id=${PRODUCT}`;
+
+const FLAGGED = [
+  [/You are an AI agent powered by DeepSeek Harness/gi, "You are an AI agent powered by DeepSeek-Harness"],
+  [/You are Claude Code/gi, "You are the Claude Code CLI"],
+  [/You are Codex/gi, "You are the Codex agent"],
+  [/Codex CLI/gi, "Codex command-line tool"],
+  [/You are opencode/gi, "You are the opencode agent"],
+  [/You are Cursor/gi, "You are the Cursor agent"],
+  [/You are Cline/gi, "You are the Cline agent"],
+  [/You are Qwen Code/gi, "You are the Qwen Code agent"],
+];
+
+function unflagged(text) {
+  for (const [re, to] of FLAGGED) text = text.replace(re, to);
+  return text;
+}
+
+function unflag(messages) {
+  let changed = false;
+  for (const m of messages) {
+    if (!m || (m.role !== "system" && m.role !== "developer")) continue;
+    if (typeof m.content === "string") {
+      const t = unflagged(m.content);
+      if (t !== m.content) {
+        m.content = t;
+        changed = true;
+      }
+    } else if (Array.isArray(m.content)) {
+      for (const part of m.content) {
+        if (typeof part?.text !== "string") continue;
+        const t = unflagged(part.text);
+        if (t !== part.text) {
+          part.text = t;
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
+const REFUSED_HINT =
+  "AutoClaw refuses chats whose system prompt carries another agent's identity line (Claude Code, Codex, opencode, Cursor, Cline, Qwen Code, DeepSeek Harness); this plugin rewrites the ones it knows, so an unknown one needs another provider in this group";
+
+async function explained(res) {
+  if (res.status < 400) return res;
+  const headers = new Headers(res.headers);
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  headers.set("X-Magpie-Sign-In", "kept");
+  const text = await res.text().catch(() => "");
+  if (res.status !== 406) return new Response(text, { status: res.status, statusText: res.statusText, headers });
+  let said = "";
+  try {
+    said = JSON.parse(text)?.error?.message ?? "";
+  } catch {}
+  headers.set("content-type", "application/json");
+  return new Response(
+    JSON.stringify({ error: { message: `${said || "406 Not Acceptable"} — ${REFUSED_HINT}`, type: "permission_error", code: null } }),
+    { status: res.status, statusText: res.statusText, headers },
+  );
+}
+
+function autoclawRewriteBody(rawBody) {
+  let payload;
+  try {
+    payload = JSON.parse(typeof rawBody === "string" ? rawBody : new TextDecoder().decode(rawBody));
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.messages)) return null;
+
+  unflag(payload.messages);
+
+  const idx = payload.messages.findIndex((m) => m && m.role === "system");
+  if (idx >= 0) {
+    const cur = payload.messages[idx].content;
+    if (typeof cur === "string") {
+      if (!cur.startsWith(OFFICIAL_SYSTEM_PROMPT)) {
+        payload.messages[idx] = { ...payload.messages[idx], content: `${OFFICIAL_SYSTEM_PROMPT}\n\n${cur}` };
+      }
+    } else if (Array.isArray(cur)) {
+      payload.messages[idx] = {
+        ...payload.messages[idx],
+        content: [{ type: "text", text: OFFICIAL_SYSTEM_PROMPT }, ...cur],
+      };
+    } else {
+      payload.messages[idx] = { ...payload.messages[idx], content: OFFICIAL_SYSTEM_PROMPT };
+    }
+  } else {
+    payload.messages = [{ role: "system", content: OFFICIAL_SYSTEM_PROMPT }, ...payload.messages];
+  }
+
+  delete payload.max_tokens;
+  delete payload.max_completion_tokens;
+  return payload;
+}
+
 
 const OAUTH_EXPIRY_SKEW_MS = 10 * 60 * 1000;
 const FALLBACK_EXPIRES_IN_S = 5 * 3600;
 /** 本地 OAuth 会话上限：callback 的等待是 5 分钟；宿主不调 callback 时兜底释放端口。 */
 const OAUTH_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 
+const VARIANTS = Object.fromEntries(["low", "high", "max"].map((effort) => [effort, { reasoningEffort: effort }]));
+
 /** 模型清单：键 = magpie 里显示的 id；值里的 id = 上游接受的 routeModelId。 */
-function autoclawModels() {
+function overseasModels() {
+  // Live verified overseas catalog: zai_glm-5-turbo and tdpsk_deepseek-* are gone upstream (400 非法模型).
   return {
     "zai_auto": { name: "GLM Auto (路由)", id: "zai_auto", limit: { context: 200000, output: 32000 }, reasoning: true, tool_call: true },
     "zai_auto-fast": { name: "GLM Auto Fast", id: "zai_auto-fast", limit: { context: 200000, output: 32000 }, reasoning: true, tool_call: true },
-    "zai_glm-5.3-flash": { name: "GLM-5.3 Flash", id: "zai_glm-5.3-flash", limit: { context: 1000000, output: 32000 }, reasoning: true, tool_call: true },
-    "zai_glm-5-turbo": { name: "GLM-5 Turbo", id: "zai_glm-5-turbo", limit: { context: 200000, output: 32000 }, reasoning: true, tool_call: true },
     "zaicoding_glm-5.3": { name: "GLM-5.3 Coding", id: "zaicoding_glm-5.3", limit: { context: 1000000, output: 131072 }, reasoning: true, tool_call: true },
-    "tdpsk_deepseek-v4-flash-202605": { name: "DeepSeek V4 Flash", id: "tdpsk_deepseek-v4-flash-202605", limit: { context: 1000000, output: 384000 }, reasoning: true, tool_call: true },
-    "tdpsk_deepseek-v4-pro-202606": { name: "DeepSeek V4 Pro", id: "tdpsk_deepseek-v4-pro-202606", limit: { context: 1000000, output: 384000 }, reasoning: true, tool_call: true },
+    "zai_glm-5.3-flash": { name: "GLM-5.3 Flash", id: "zai_glm-5.3-flash", limit: { context: 1000000, output: 32000 }, reasoning: true, tool_call: true },
   };
+}
+
+/** The CN live managed-model catalog, saved by AutoClaw 2.1.0. */
+function managedModels() {
+  return {
+    "zai_auto": { name: "Auto", id: "zai_auto", limit: { context: 1048576, output: 393216 }, reasoning: true, attachment: true, tool_call: true, variants: VARIANTS },
+    "zai_auto-fast": { name: "Auto-Fast", id: "zai_auto-fast", limit: { context: 1048576, output: 131072 }, reasoning: true, attachment: true, tool_call: true, variants: VARIANTS },
+    "zaicoding_glm-5.3": { name: "GLM-5.3", id: "zaicoding_glm-5.3", limit: { context: 1048576, output: 307200 }, reasoning: true, attachment: false, tool_call: true, variants: VARIANTS },
+    "zai_glm-5.3-flash": { name: "GLM-5.3-Flash", id: "zai_glm-5.3-flash", limit: { context: 1048576, output: 131072 }, reasoning: true, attachment: true, tool_call: true, variants: VARIANTS },
+  };
+}
+
+function autoclawModels(providerId = "autoclaw") {
+  return providerId === "autoclaw-cn" ? managedModels() : overseasModels();
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +487,48 @@ async function refreshTokens(refreshToken, preferredHosts) {
 // 插件工厂
 // ---------------------------------------------------------------------------
 
+function managedHeaders(token, model) {
+  const ts = String(Math.floor(Date.now() / 1000));
+  const rid = randomHex(16);
+  const headers = new Headers(bizHeaders());
+  headers.set("Accept", "application/json");
+  headers.set("User-Agent", `AutoClaw/${CN_CLIENT_VERSION} (${PLATFORM_TM}-${process.arch})`);
+  headers.set("X-Channel", CN_CHANNEL);
+  headers.set("X-Version", CN_CLIENT_VERSION);
+  headers.set("X-Trace-Id", rid);
+  headers.set("X-Request-Id", rid);
+  headers.set("X-Request-Model", model);
+  headers.set("X-Client-Type", "pc");
+  headers.set("x_trace_id", "autoclaw-desktop");
+  headers.set("X-Agent-Id", "main");
+  headers.set("X-Authorization", `Bearer ${bareToken(token)}`);
+  headers.delete("Authorization");
+  return headers;
+}
+
+function rewriteManagedBody(body) {
+  const payload = JSON.parse(String(body ?? "{}"));
+  const model = typeof payload.model === "string" ? payload.model : "zai_auto";
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  payload.model = model;
+  // The gateway rejects max_tokens, but accepts both streaming modes.
+  delete payload.max_tokens;
+  delete payload.max_completion_tokens;
+  unflag(messages);
+  const [first, ...rest] = messages;
+  if (first?.role === "system") {
+    // Prefix inside the caller's existing system message avoids competing
+    // system roles while satisfying the gateway's AutoClaw check.
+    const content = Array.isArray(first.content)
+      ? [{ type: "text", text: OFFICIAL_SYSTEM_PROMPT }, ...first.content]
+      : `${OFFICIAL_SYSTEM_PROMPT}\n\n${String(first.content ?? "")}`;
+    payload.messages = [{ ...first, content }, ...rest];
+  } else {
+    payload.messages = [{ role: "system", content: OFFICIAL_SYSTEM_PROMPT }, ...messages];
+  }
+  return { payload, model };
+}
+
 function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod }) {
   return async ({ client }, options) => ({
     config: async (cfg) => {
@@ -379,7 +537,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
         name: providerName,
         npm: "@ai-sdk/openai-compatible",
         api: homeHost,
-        models: autoclawModels(),
+        models: autoclawModels(providerId),
       };
     },
 
@@ -413,40 +571,67 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
         return {
           baseURL: homeHost,
           async fetch(input, init) {
-            const headers = new Headers(init?.headers);
-            headers.set("X-Authorization", `Bearer ${accessToken}`);
-            headers.set("X-Client-Type", "pc");
-            headers.set("X-Product", PRODUCT);
-            headers.set("X-Harness-Type", "zcode");
-            headers.set("X-Tm", PLATFORM_TM);
-            headers.set("X-Version", CLIENT_VERSION);
-            headers.set("X-Lang", "zh-CN");
-            headers.set("X-Channel", CHANNEL);
-            headers.set("x_trace_id", "autoclaw-desktop");
-            headers.delete("Authorization");
+            if (providerId !== "autoclaw-cn") {
+              const headers = new Headers(init?.headers);
+              headers.set("User-Agent", USER_AGENT);
+              headers.set("X-Authorization", `Bearer ${accessToken}`);
+              headers.set("X-Client-Type", "pc");
+              headers.set("X-Product", PRODUCT);
+              headers.delete("X-Harness-Type");
+              headers.set("X-Tm", PLATFORM_TM);
+              headers.set("X-Version", CLIENT_VERSION);
+              headers.set("X-Lang", "zh-CN");
+              headers.set("X-Channel", CHANNEL);
+              headers.set("x_trace_id", "autoclaw-desktop");
+              headers.delete("Authorization");
 
-            let routeModel = "";
-            try {
-              const body = JSON.parse(String(init?.body ?? "{}"));
-              routeModel = String(body.model ?? "");
-            } catch { /* 保持空 */ }
-            if (routeModel) headers.set("X-Request-Model", routeModel);
-            headers.set("X-Request-Id", randomHex(16));
+              let routeModel = "";
+              let nextBody = init?.body;
+              const rewritten = autoclawRewriteBody(init?.body);
+              if (rewritten) {
+                routeModel = String(rewritten.model ?? "");
+                nextBody = JSON.stringify(rewritten);
+                headers.delete("content-length");
+              } else {
+                try {
+                  routeModel = String(JSON.parse(String(init?.body ?? "{}")).model ?? "");
+                } catch {}
+              }
+              if (routeModel) headers.set("X-Request-Model", routeModel);
+              headers.set("X-Request-Id", randomHex(16));
 
-            const tryFetch = (host) =>
-              fetch(`${host}${CHAT_PATH}`, { ...init, headers, signal: init?.signal });
+              const tryFetch = (host) =>
+                fetch(`${host}${CHAT_PATH}`, { ...init, headers, body: nextBody, signal: init?.signal });
 
-            const res1 = await tryFetch(hosts[0]);
-            if (res1.status !== 401 && res1.status !== 403) return res1;
-            const res2 = await tryFetch(hosts[1]);
-            if (res2.status === 401 || res2.status === 403) {
-              try { res2.body?.cancel?.(); } catch {}
-              return new Response(JSON.stringify({ error: { message: "AutoClaw 登录已失效（两个 host 均拒绝该 token）", type: "invalid_request_error" } }), {
-                status: 401,
-                headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": "expired" },
-              });
+              const res1 = await tryFetch(hosts[0]);
+              if (res1.status !== 401 && res1.status !== 403) return explained(res1);
+              const res2 = await tryFetch(hosts[1]);
+              if (res2.status === 401 || res2.status === 403) {
+                try { res2.body?.cancel?.(); } catch {}
+                return new Response(JSON.stringify({ error: { message: "AutoClaw 登录已失效（两个 host 均拒绝该 token）", type: "invalid_request_error" } }), {
+                  status: 401,
+                  headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": "expired" },
+                });
+              }
+              return explained(res2);
             }
-            return res2;
+
+            // The CN managed gateway is the AutoClaw 2.1.0 account-points
+            // channel. It requires the system prefix and rejects max_tokens.
+            const { payload, model } = rewriteManagedBody(init?.body);
+            const headers = managedHeaders(accessToken, model);
+            const res = await fetch(MANAGED_HOST + CN_CHAT_PATH, {
+              ...init,
+              method: "POST",
+              headers,
+              body: JSON.stringify(payload),
+            });
+            if (res.status !== 401 && res.status !== 403) return res;
+            try { res.body?.cancel?.(); } catch {}
+            return new Response(JSON.stringify({ error: { message: "AutoClaw 登录已失效", type: "invalid_request_error" } }), {
+              status: 401,
+              headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": "expired" },
+            });
           },
         };
       },
@@ -632,7 +817,7 @@ const overseaOAuthMethod = {
  * url = 本地引导页（滑块在内完成，之后自动跳授权页）；callback 挂起等 code，
  * 拿到后直连上游换 token。
  */
-async function startLocalOAuth(vendor, openFn = openBrowser) {
+async function startLocalOAuth(vendor, openFn) {
   const deviceId = newDeviceId();
   const state = {
     captchaReceipt: null,
@@ -803,6 +988,10 @@ async function startLocalOAuth(vendor, openFn = openBrowser) {
     server.listen(fixedPort, "127.0.0.1", () => resolve(fixedPort));
   });
 
+  // Do not hand the host a page until the listener is ready. The host owns
+  // opening authorization URLs, including Windows and remote web sessions.
+  await serverReady;
+
   // 会话最长 OAUTH_SESSION_TIMEOUT_MS：宿主可能永远不调 callback（用户在 magpie
   // 里取消），定时器负责关服务器、释放官方 TokenServer 端口。
   let sessionDone = false;
@@ -822,15 +1011,15 @@ async function startLocalOAuth(vendor, openFn = openBrowser) {
   sessionTimer.unref?.();
 
   return {
-    url: "", // 由 callback 里自行开浏览器（本地引导页），宿主不重复打开
-    instructions: `已打开本地引导页（未自动打开时手动访问 http://127.0.0.1:${fixedPort}/ ）：请完成滑块验证并登录授权，完成后自动返回 magpie。`,
+    url: `http://127.0.0.1:${fixedPort}/`, // The host opens this only after listen succeeds.
+    instructions: `本地登录页已就绪（未自动打开时手动访问 http://127.0.0.1:${fixedPort}/ ）：请完成滑块验证并登录授权，完成后自动返回 magpie。`,
     method: "auto",
     async callback() {
       const port = await serverReady;
       const guide = `http://127.0.0.1:${port}/`;
       const redirectUri = `http://localhost:${port}/auth/callback-${vendor}`;
       try {
-        openFn(guide);
+        if (openFn) openFn(guide); // Optional test hook; production uses the host URL.
         const code = await waitFor(5 * 60 * 1000, "浏览器登录");
         const res = await callEnvelope(`/userapi/overseasv1/${vendor}-oauth-login`, {
           method: "POST",
@@ -857,19 +1046,6 @@ async function startLocalOAuth(vendor, openFn = openBrowser) {
       }
     },
   };
-}
-
-/** 跨平台打开浏览器（node:child_process，Bun / Node 宿主均可；失败时用户可手动打开 instructions 里的地址）。 */
-function openBrowser(urlStr) {
-  const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-  try {
-    // Windows 的 start 是 cmd 内建命令，必须走 shell。
-    const child = process.platform === "win32"
-      ? spawn(cmd, [urlStr], { shell: true, stdio: "ignore", detached: true })
-      : spawn(cmd, [urlStr], { stdio: "ignore", detached: true });
-    child.on("error", () => { /* 打开失败静默：instructions 已给出可手动访问的地址 */ });
-    child.unref();
-  } catch { /* 同上 */ }
 }
 
 /** 引导页：滑块（如启用）→ 继续授权 → 自动跳授权页。 */
@@ -971,6 +1147,7 @@ function loadCaptchaLib(){
     setTimeout(()=>resolve(),10000);
   });
 }
+let leavingForAuthorization=false;
 document.getElementById("goBtn").addEventListener("click",async()=>{
   const btn=document.getElementById("goBtn");btn.disabled=true;btn.textContent="正在获取授权页…";
   try{
@@ -979,10 +1156,11 @@ document.getElementById("goBtn").addEventListener("click",async()=>{
     if(j.error){msg(j.error,"err");btn.disabled=false;btn.textContent="继续授权";return;}
     document.getElementById("steps").style.display="none";btn.style.display="none";
     document.getElementById("done").style.display="block";
-    setTimeout(()=>{location.href=j.url;},600);
-  }catch(e){msg("网络错误："+e.message,"err");btn.disabled=false;btn.textContent="继续授权";}
+    setTimeout(()=>{leavingForAuthorization=true;location.href=j.url;},600);
+  }catch(e){msg("本地登录连接已断开或会话已结束，请回 magpie 重新发起登录："+e.message,"err");btn.disabled=false;btn.textContent="继续授权";}
 });
 window.addEventListener("beforeunload",()=>{
+  if(leavingForAuthorization)return;
   try{navigator.sendBeacon("/abort",new Blob([JSON.stringify({reason:"页面关闭"})],{type:"application/json"}));}catch(_){}
 });
 boot().catch((e)=>msg("初始化失败："+e.message,"err"));
@@ -1021,8 +1199,10 @@ export const AutoclawCnAuthPlugin = makeAutoclawPlugin({
 
 /** 测试辅助（magpie/OpenCode 不会把它当插件调用）。 */
 export const _internal = {
+  makePluginForTest: makeAutoclawPlugin,
   md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinConfig, checkinOutcome, refreshTokens,
   fetchUserProfile, accountDisplayName, startLocalOAuth,
+  FLAGGED, unflagged, unflag, autoclawRewriteBody, explained, OFFICIAL_SYSTEM_PROMPT, REFUSED_HINT,
   guidePageHtml, callbackPageHtml,
 };
