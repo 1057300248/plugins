@@ -46,7 +46,7 @@ test("the device's already-checked answer is ineligible", async () => {
   expect(await checkin()).toEqual({ outcome: "ineligible", message: "this device has checked in today" })
 })
 
-test("Trae's busy answer is failed without another device", async () => {
+test("Trae's 9074 on the claim is the day's answer, on the account's own device", async () => {
   f = fakeTrae()
   f.route("POST " + STATUS, () => json({ code: 0, enable: true, checked_in: false }))
   f.route("POST " + CLAIM, () => json({ code: 9074, message: "当前参与用户太多" }))
