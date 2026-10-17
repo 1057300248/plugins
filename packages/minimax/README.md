@@ -107,8 +107,18 @@ The usage card shows:
 
 These are read the way MiniMax Code reads them, with its signed account API.
 
+## Check-in
+
+The account's daily check-in (每日签到) is claimed through the same sign-in:
+the plugin reads the panel (`/minimax-cloud/api/v1/signin/status`) and
+claims the day's credits (`/minimax-cloud/api/v1/signin/claim`) with the
+same signed account API. magpie can run it once a day per account, when its
+MiniMax check-in switch is on; Settings → Usage → Plugins has that switch
+and a *Check in now* button, and the outcome — claimed, done, inactive,
+ineligible, with the streak — lands on the account's Usage card.
+OpenCode doesn't call this hook: there, check in from MiniMax Code or
+MiniMax's site.
+
 ## Not here
 
-- **No check-in.** The package never claims the daily check-in's credits.
-  Check in from MiniMax Code or MiniMax's site.
 - **No sign-out.** Signing out doesn't revoke the token on MiniMax's side.

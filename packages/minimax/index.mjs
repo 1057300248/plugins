@@ -7,7 +7,8 @@
 // device flow with PKCE, client mcode-public): nothing is read from or
 // written to MiniMax Code's own sign-in (~/.minimax). Its chats are
 // Anthropic messages at <agent>/mavis/api/v1/llm/v1/messages, sent with
-// MiniMax Code's headers. No check-in is made for the account.
+// MiniMax Code's headers. The account's daily check-in (每日签到) is
+// claimed with the same token, on the minimax-cloud endpoints.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto"
 
@@ -315,8 +316,8 @@ class SignInExpired extends Error {
 // signed is a request of MiniMax Code's account API, signed as mcode signs
 // one: yy over the path and query, the body ("{}" for a GET) and the time;
 // x-signature over the time (and the body of a POST).
-function signed(site, path, { access, userID, body, now = Date.now(), tz = new Date().getTimezoneOffset() * -60, platform = process.platform } = {}) {
-  const url = new URL(path, site.agent)
+function signed(site, path, { access, userID, body, origin = site.agent, now = Date.now(), tz = new Date().getTimezoneOffset() * -60, platform = process.platform } = {}) {
+  const url = new URL(path, origin)
   url.search = new URLSearchParams({
     device_platform: "mcode", biz_id: "3", app_id: "3001", version_code: "22201",
     unix: String(now), timezone_offset: String(tz), sys_language: site.lang, lang: site.lang,
@@ -492,6 +493,58 @@ function usageOf(m, windows = []) {
     ...(m.balance !== undefined ? { balance: credits(m.balance) } : {}),
     windows,
   }
+}
+
+// ---- check-in ----------------------------------------------------------------
+
+// MiniMax pays a few credits for the daily check-in (每日签到). The panel
+// lists the week's seven days — status 1 not started, 2 claimable, 3
+// claimed, 4 not available — and the claim answers 1 claimed now or 2
+// already today. Both calls use the same signed account client as the rest
+// of the account API: the gateway checks the signature, and a Bearer-only
+// Bun fetch is not what MiniMax Code sends.
+async function checkinCall(site, access, method, path, body) {
+  const opts = { access, origin: site.llm }
+  if (body !== undefined) opts.body = body
+  return accountCall(site, path, opts, "check-in")
+}
+
+// checkinOf reads the panel and claims today: claimed (checked in now,
+// credit = the points it paid), done (already today), inactive (the day
+// hasn't started, or the panel has none), ineligible (the day isn't
+// available); a throw is failed. streak counts the claimed days up to and
+// including today.
+async function checkinOf(site, access) {
+  const panel = await checkinCall(site, access, "GET", "/minimax-cloud/api/v1/signin/status")
+  const days = Array.isArray(panel?.data?.days) ? panel.data.days : null
+  if (!days?.length) throw new Error("check-in: no panel in the reply")
+  const sorted = [...days].sort((a, b) => (a?.day_no ?? 0) - (b?.day_no ?? 0))
+  if (sorted.length !== 7 || sorted.some((d, i) => d?.day_no !== i + 1)) throw new Error("check-in: malformed panel")
+  const todays = sorted.filter((d) => d?.is_today)
+  const claimable = sorted.filter((d) => d?.status === 2)
+  if (todays.length > 1 || claimable.length > 1) throw new Error("check-in: malformed panel")
+  const today = todays[0]
+  if (!today) return { outcome: "inactive" }
+  const streakFrom = (i) => {
+    let n = 0
+    for (let j = i; j >= 0 && sorted[j]?.status === 3; j--) n++
+    return n
+  }
+  if (today.status === 3) {
+    const points = pos(today, "points")
+    return { outcome: "done", ...(points ? { credit: points } : {}), streak: streakFrom(sorted.indexOf(today)) }
+  }
+  if (today.status === 2) {
+    const claim = await checkinCall(site, access, "POST", "/minimax-cloud/api/v1/signin/claim", {})
+    const r = pos(claim?.data, "claim_result")
+    const credit = pos(claim?.data, "points")
+    const got = { ...(credit ? { credit } : {}), streak: streakFrom(sorted.indexOf(today) - 1) + 1 }
+    if (r === 1) return { outcome: "claimed", ...got }
+    if (r === 2) return { outcome: "done", ...got }
+    throw new Error(`check-in: unknown claim_result ${JSON.stringify(claim?.data?.claim_result)}`)
+  }
+  if (today.status === 4) return { outcome: "ineligible" }
+  return { outcome: "inactive" } // 1: the day hasn't started
 }
 
 // ---- requests -----------------------------------------------------------------
@@ -698,7 +751,7 @@ function makePlugin(site) {
             },
           }
         },
-        // the account's credits and M Plan; nothing is claimed (no check-in)
+        // the account's credits and M Plan
         async usage(getAuth) {
           const auth = await getAuth()
           if (auth?.type !== "oauth" || !auth.access) return { error: "not signed in" }
@@ -728,6 +781,24 @@ function makePlugin(site) {
             }
           } catch (e) {
             return { error: e?.message ?? String(e), signIn: "kept" }
+          }
+        },
+        // the daily check-in (每日签到): magpie runs it once a day per
+        // account, and its Check in now button asks right away; the
+        // outcome lands on the account's Usage card.
+        async checkin(getAuth) {
+          const auth = await getAuth()
+          if (auth?.type !== "oauth" || !auth.access) return { outcome: "failed", message: "not signed in" }
+          let a
+          try {
+            ;({ a } = await fresh(getAuth))
+          } catch (e) {
+            return { outcome: "failed", message: e?.message ?? String(e), ...(e?.signIn ? { signIn: e.signIn } : {}) }
+          }
+          try {
+            return await checkinOf(site, a.access)
+          } catch (e) {
+            return { outcome: "failed", message: e?.message ?? String(e), ...(e?.signIn ? { signIn: e.signIn } : {}) }
           }
         },
         methods: [
@@ -776,4 +847,4 @@ export const MiniMaxCodeAuthPlugin = makePlugin(SITES["minimax-code"])
 export const MiniMaxCodeGlobalAuthPlugin = makePlugin(SITES["minimax-code-global"])
 
 // for tests
-export const _internal = { SITES, MODELS, signed, md5, parseModels, planWindows, membershipOf, usageOf, credits, variants, renewing, renewed, startDevice, pollDevice }
+export const _internal = { SITES, MODELS, signed, md5, parseModels, planWindows, membershipOf, usageOf, credits, variants, renewing, renewed, startDevice, pollDevice, checkinOf }
