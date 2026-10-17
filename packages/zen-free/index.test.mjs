@@ -126,16 +126,17 @@ for (const { protocol, path, model } of protocols) {
           // Zen's free tier refuses a bash or read that takes nothing
           assert.equal(Object.keys((tool.parameters ?? tool.input_schema).properties).length, 1);
         }
-        // A call of a tool the agent doesn't have is left out, said in
-        // the reply's text, and the turn ends as a stop rather than
-        // failing (#76).
+        // A call of a tool the agent doesn't have reaches the agent as
+        // called, as a tool call, so the agent answers it with its own
+        // unknown-tool error and the model goes on; it neither fails the
+        // turn (#76) nor ends it as a plain answer (#209).
         state.reply = toolReply(protocol, "edit", upstreamSSE);
-        const left = await send();
-        assert.equal(left.status, 200);
-        const text = await left.text();
-        assert.doesNotMatch(text, /"name"\s*:\s*"edit"/);
-        assert.doesNotMatch(text, /"error"|"tool_calls"|"tool_use"|"function_call"/);
-        assert.match(text, /a tool this agent doesn't have: \\"edit\\"/);
+        const handed = await send();
+        assert.equal(handed.status, 200);
+        const text = await handed.text();
+        assert.match(text, /"name"\s*:\s*"edit"/);
+        assert.match(text, /"tool_calls"|"tool_use"|"function_call"/);
+        assert.doesNotMatch(text, /"error"|The call was left out/);
       });
     }
   }
@@ -156,7 +157,7 @@ test("keeps declared tools isolated between requests using the same loader", asy
   assert.equal(blocked.status, 200);
   const text = await blocked.text();
   assert.doesNotMatch(text, /"name"\s*:\s*"Bash"/);
-  assert.match(text, /a tool this agent doesn't have: \\"bash\\"/);
+  assert.match(text, /"name"\s*:\s*"bash"/);
 });
 
 for (const [input, supplied, expected] of [

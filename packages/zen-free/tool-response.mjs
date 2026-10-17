@@ -48,8 +48,13 @@ function foldsTo(declared, key) {
   return folded;
 }
 
-// nameGuard answers the agent's name for a call, or null for a call of no
-// tool the agent has (a missing name included).
+// nameGuard answers the agent's name for a call: the agent's spelling when
+// one folds to it, else the name as the model wrote it. A call of a tool
+// the agent doesn't have (bedit, psh, mcp__netcatcatty__unused) goes to the
+// agent as called, like any other provider's: the agent answers it with
+// its own unknown-tool error, and the model corrects the name and goes on
+// (#209). Leaving it out ended an agent's turn as a plain answer. Only a
+// call with no name answers null, and is left out.
 function nameGuard(policy) {
   const declared = new Set(policy.declared);
   const lower = (name) => name.toLowerCase();
@@ -61,16 +66,15 @@ function nameGuard(policy) {
     if (declared.has(name)) return name;
     const match =
       byCase.get(lower(name)) ?? (byCase.has(lower(name)) ? null : byShape.get(bare(name)));
-    return match || null;
+    return match || name;
   };
 }
 
-// The models also call tools no agent has: bedit, bcp, ash, a mangled
-// mcp__netcatcatty__unused (#76). Such a call can't be run or named onto
-// one the agent has, and failing the reply for it threw away the whole
-// turn. It is left out instead, and the reply says so in its text, where
-// the agent's user and the model's next turn both read it. A reply left
-// with no call ends as a plain stop.
+// A call with no name can't be answered by any agent, and failing the
+// reply for it threw away the whole turn (#76). It is left out instead,
+// and the reply says so in its text, where the agent's user and the
+// model's next turn both read it. A reply left with no call ends as a
+// plain stop.
 export function droppedNote(name) {
   return typeof name === "string" && name
     ? `(The model called a tool this agent doesn't have: ${JSON.stringify(name.slice(0, 128))}. The call was left out.)`

@@ -56,15 +56,18 @@ The agent's tools are preserved. Zen's models often call OpenCode's own
 tool names; such a call is given the agent's tool whose name differs only
 in case (`bash` to `Bash`), or else only in case and `_`/`-` (`todowrite`
 to `todo_write`, `webfetch` to `web_fetch`), when exactly one does. A
-call with no such tool (or with no name) is left out of the reply, and
-the reply's text says which name was left out; a turn whose every call
-was left out ends as an ordinary answer. Tools run in the agent.
+call of a tool the agent has no spelling of (`psh` beside `pwsh`, `bedit`)
+reaches the agent as the model called it, as with any other provider: the
+agent answers it with its own unknown-tool error, and the model corrects
+the name and goes on. Only a call with no name is left out, and the
+reply's text says so; a turn whose every call was left out ends as an
+ordinary answer. Tools run in the agent.
 
 Zen's free tier only answers a request that carries tools, so a request
 is sent with the five core OpenCode tools the agent doesn't declare
 itself (`bash`, `edit`, `glob`, `grep`, `read`), described as not
-available. A call of one of them the agent doesn't have is left out like
-any other.
+available. A call of one of them the agent doesn't have reaches the agent
+like any other.
 
 Now and then Zen closes a streamed Chat Completions reply before its
 `[DONE]`. When the reply has said something and no tool call of it is
