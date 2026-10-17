@@ -1,5 +1,13 @@
 # macOS compatibility record
 
+## Upgrade 0.1.4
+
+On Windows 11, 2026-10-17, the upgraded provider read the existing ordinary desktop Work sign-in and live model catalog/usage. An isolated adapter inserted a shared instruction and passed its messages through this provider unchanged to the real Work service. The streamed response was HTTP 200 with `[DONE]` and the exact marker present only in that instruction. The live desktop applications and their configurations were not switched for this request. Synthetic regression tests cover credential rotation, account binding, Request bodies, prompt/tool/stream preservation, expired sign-in, unchanged concurrency/quota/5xx responses, network diagnostics, cancellation and read-only desktop import.
+
+On macOS 26.6.2 arm64, Kimi 3.2.17 build 3.2.17.4, at 2026-10-17 04:37 UTC, version 0.1.4 again read the existing Work sign-in, discovered `k3-agent` and `k2d8-preview`, and returned one shared membership window. This upgrade probe did not submit a Mac desktop conversation; the earlier streamed macOS inference evidence below remains a separate record.
+
+At **2026-10-17 05:31 UTC**, the corrected 0.1.4 provider was also tested through the user's active Mac profile: ordinary Kimi's authenticated loopback adapter → official Magpie 0.1.1276 → Kimi Work `k3-agent`. The Agent was the community-published 0.1.1; the provider was a persistent local source pending this PR. One synthetic streamed request returned HTTP 200, `[DONE]` and exactly `KIMI_MAC_ROUTED_OK`, with a newly appended Magpie usage record identifying `agent: kimi-desktop`, `provider: kimi-work`, `model: k3-agent`, `status: 200`. Desktop credentials, provider settings, general settings and plugin auth were verified unchanged. This request was sent by an HTTP probe, not submitted through the desktop UI. The 429/5xx/network failure cases were tested with synthetic responses, not forced against Kimi's live service.
+
 Observed at **2026-10-16 20:09 UTC** (2026-10-17 04:09 UTC+8).
 
 | Component | Observed version |
