@@ -67,7 +67,11 @@ GitHub login.
 
 - **After sign-in:** the account's own list comes from Zed's `GET /models`,
   read when you sign in and every 10 minutes after. Disabled models are
-  left out. Each model's effort levels become its variants.
+  left out. Each model's effort levels become its variants. When a read
+  fails, the list read last is kept; when none was ever read (Zed down,
+  or a list with nothing callable, as for an organization without an
+  active subscription), the hook throws why, and magpie shows that reason
+  with the account, the declared models marked as not its list (#229).
 - **Before sign-in:** the config hook declares one model of each family
   (Claude Sonnet 5, Opus 5.5, Haiku 4.5, GPT-5.5, Gemini 3.5 Flash,
   Grok 4.7), which the account's list replaces.

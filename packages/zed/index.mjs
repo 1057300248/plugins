@@ -1029,7 +1029,14 @@ export async function ZedAuthPlugin({ client } = {}) {
             // ZedToken → zedLapse), so magpie is told as an answer's
             // X-Magpie-Sign-In would tell it
             if (e instanceof SignInExpired) throw Object.assign(e, { signIn: "expired" })
-            if (!l) return provider.models
+            // never read for this account: the six declared before sign-in
+            // aren't its list, nor their limits its limits, so say why
+            // there is none rather than hand them back as if they were.
+            // A 200 that lists nothing callable (every model disabled, an
+            // organization without a subscription) is a failure too, which
+            // a host judging by the response's status alone wouldn't see
+            // (#229, ReneXiong). A list read before is kept below.
+            if (!l) throw /^Zed\b/.test(e?.message ?? "") ? e : new Error(`Zed: this account's models couldn't be read: ${e?.message ?? e}`)
           }
         }
         return Object.fromEntries(l.models.map((m) => [m.id, model(m)]))
