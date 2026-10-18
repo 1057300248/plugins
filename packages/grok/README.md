@@ -27,6 +27,11 @@ the installer does, before a sign-in that needs it.
   - If it is signed in, the sign-in goes to a home of this plugin's,
     `$XDG_CONFIG_HOME/opencode-grok-auth/<random>` (else under
     `~/.config`). Grok Build's own sign-in stays as it is.
+  - The account is told apart by its email, else its xAI user id (an
+    account signed in through X can have no email). `GROK_AUTH_PATH` is
+    left out of the CLI's run, so the sign-in lands in that home.
+  - When the CLI finishes but leaves no sign-in there, the failure says
+    which file it read and what it found.
 - **Use Grok Build's current sign-in** takes the account the CLI is
   signed in to, with nothing to approve.
 - **Import CPA Grok account JSON** copies one enabled xAI OAuth account from

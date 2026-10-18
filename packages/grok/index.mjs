@@ -97,34 +97,60 @@ function executable() {
   return ""
 }
 
-// envFor runs the CLI as the user runs it, in the given home.
+// envFor runs the CLI as the user runs it, in the given home. GROK_AUTH_PATH
+// goes too: grok 1.0.62 keeps its sign-in at that file instead of
+// home/auth.json, where this plugin reads it, so a login with it set
+// finished signed in and left nothing here.
 function envFor(home) {
   const env = {}
   for (const [k, v] of Object.entries(process.env)) {
-    if (["GROK_HOME", "GROK_AUTH_PROVIDER_COMMAND", "GROK_AUTH_EXPIRED"].includes(k.toUpperCase())) continue
+    if (["GROK_HOME", "GROK_AUTH_PATH", "GROK_AUTH_PROVIDER_COMMAND", "GROK_AUTH_EXPIRED"].includes(k.toUpperCase())) continue
     env[k] = v
   }
   env.GROK_HOME = home
   return env
 }
 
-// credential is the sign-in the CLI keeps in home: the first, by key, with a token.
-function credential(home) {
+// look reads the sign-in the CLI keeps in home: the first, by key, with a
+// token. With none, why says what the file held instead.
+//
+// who is the account it is: its email, else its xAI user id (the token's
+// subject when the file has none). grok 1.0.62 takes both from the
+// sign-in's id_token and writes "email": null when that
+// has no email claim (an xAI account signed in through X has none), and
+// still says "✓ Signed in" (llllleo9 on 𝕏; seen with grok 1.0.62 in a
+// sandbox, signed in against a stand-in auth.x.ai).
+function look(home) {
+  const file = join(home, "auth.json")
+  let text
+  try {
+    text = readFileSync(file, "utf8")
+  } catch (e) {
+    return { c: null, why: e?.code === "ENOENT" ? `there is no ${file}` : `${file} can't be read (${e?.code ?? e?.message})` }
+  }
   let all
   try {
-    all = JSON.parse(readFileSync(join(home, "auth.json"), "utf8"))
+    all = JSON.parse(text)
   } catch {
-    return null
+    return { c: null, why: `${file} isn't JSON` }
   }
-  if (!all || typeof all !== "object") return null
-  for (const k of Object.keys(all).sort()) {
+  if (!all || typeof all !== "object" || Array.isArray(all)) return { c: null, why: `${file} holds no sign-in` }
+  const keys = Object.keys(all).sort()
+  for (const k of keys) {
     const c = all[k]
     if (c && typeof c.key === "string" && c.key) {
       const t = Date.parse(c.expires_at ?? "")
-      return { key: c.key, email: c.email ?? "", expires: Number.isFinite(t) ? t : 0, issuer: c.oidc_issuer ?? "" }
+      const email = typeof c.email === "string" ? c.email : ""
+      const sub = cpaClaims(c.key)?.sub
+      const user = (typeof c.user_id === "string" && c.user_id) || (typeof sub === "string" ? sub : "")
+      return { c: { key: c.key, email, user, who: email || user, expires: Number.isFinite(t) ? t : 0, issuer: c.oidc_issuer ?? "" }, why: "" }
     }
   }
-  return null
+  return { c: null, why: keys.length ? `${file} has ${keys.join(", ")}, none with a token` : `${file} holds no sign-in` }
+}
+
+function credential(home) {
+  return look(home).c
 }
 
 function run(file, args, opts) {
@@ -438,10 +464,10 @@ function modelOf(id) {
 
 // login runs `grok login --device-auth` in home and hands on the first link
 // it prints; done is settled when the command is.
-function login(exe, home, own) {
+function login(exe, home) {
   const child = spawn(exe, ["login", "--device-auth"], {
     cwd: homedir(),
-    env: own ? envFor(home) : process.env,
+    env: envFor(home),
     stdio: ["ignore", "pipe", "pipe"],
   })
   const tail = []
@@ -495,7 +521,7 @@ async function signIn() {
   if (!exe) throw new Error(NO_CLI)
   const own = !!credential(cliHome())
   const home = own ? newHome() : cliHome()
-  const { child, link, done, tail } = login(exe, home, own)
+  const { child, link, done, tail } = login(exe, home)
   const url = await Promise.race([link, new Promise((r) => setTimeout(() => r(""), LINK_WAIT))])
   if (!url) {
     child.kill()
@@ -511,10 +537,19 @@ async function signIn() {
     method: "auto",
     callback: async () => {
       const r = await done
-      const c = r.ok ? credential(home) : null
-      if (!c || (own && !c.email)) {
+      const { c, why } = r.ok ? look(home) : { c: null, why: "" }
+      // a sign-in beside the CLI's own needs to know whose it is, so the
+      // same account signed in again replaces it instead of adding a second
+      if (!c || (own && !c.who)) {
         if (own) rmSync(home, { recursive: true, force: true })
-        return { type: "failed", error: r.ok ? "grok login finished without an account" : r.why }
+        if (!r.ok) return { type: "failed", error: r.why }
+        const said = tail.at(-1) ? ` (it said "${tail.at(-1)}")` : ""
+        return {
+          type: "failed",
+          error: !c
+            ? `grok login finished${said}, but left no sign-in where this plugin reads it: ${why}. Run \`grok login\` in a terminal, then add Grok with "Use Grok Build's current sign-in"`
+            : `grok login finished${said}, but its sign-in in ${join(home, "auth.json")} names no account (no email, user id or token subject), so it can't be told from the Grok Build sign-in in ${cliHome()}. Sign in to that one with \`grok login\` and add it with "Use Grok Build's current sign-in"`,
+        }
       }
       return saved(home, c)
     },
@@ -596,7 +631,7 @@ async function importCPA(inputs) {
 // saved is the sign-in as OpenCode keeps it: refresh is the home the CLI
 // keeps it in, access the token it had then.
 function saved(home, c) {
-  return { type: "success", refresh: home, access: c.key, expires: c.expires, accountId: c.email }
+  return { type: "success", refresh: home, access: c.key, expires: c.expires, accountId: c.who }
 }
 
 // current takes the sign-in the CLI already has, as it is.
@@ -751,7 +786,7 @@ export const GrokAuthPlugin = async ({ client }) => {
   const remember = async (auth, c) => {
     if (auth.access === c.key && auth.expires === c.expires) return
     try {
-      await client.auth.set({ path: { id: PROVIDER }, body: { ...auth, access: c.key, expires: c.expires, accountId: c.email || auth.accountId } })
+      await client.auth.set({ path: { id: PROVIDER }, body: { ...auth, access: c.key, expires: c.expires, accountId: c.who || auth.accountId } })
     } catch {}
   }
 
