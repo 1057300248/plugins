@@ -177,18 +177,40 @@ function who(me) {
   return "Zed account"
 }
 
-// orgOf is the organization the account's models are asked under: its
-// default one when it is among its organizations, else its first, as Zed
-// picks it.
-function orgOf(me) {
-  const orgs = me.organizations ?? []
+// orgOf is the organization the account's models are asked under. Zed's
+// editor starts in the default organization, else the first, and asks for
+// its model token with whichever one is current (cloud.rs auth_context);
+// its title bar lets the user switch away from one without a subscription,
+// and plans_by_organization names each organization's plan (an
+// organization it leaves out has none: user.rs
+// current_organization_has_no_active_subscription). The plugin has no such
+// switcher, so it picks as a user would (#232, ReneXiong): the
+// organization it saved, while that one still has a plan that calls
+// models; else the default, if it has one; else such an organization, the
+// personal one first. When none has, it keeps what Zed would pick: the one
+// saved, else the default, else the first.
+function orgOf(me, saved = "") {
+  const orgs = (me.organizations ?? []).filter((o) => o?.id)
+  const usable = (o) => !!o && paid(me.plans_by_organization?.[o.id]) && !modelsOff(me, o.id)
+  const keep = orgs.find((o) => o.id === saved)
   const def = orgs.find((o) => o.id === me.default_organization_id)
-  if (def) return def.id
-  if (orgs.length) return orgs[0].id
-  return me.default_organization_id ?? ""
+  const pick = [keep, def].find(usable) ?? orgs.find((o) => o.is_personal && usable(o)) ?? orgs.find(usable) ?? keep ?? def ?? orgs[0]
+  if (pick) return pick.id
+  return saved || me.default_organization_id || ""
 }
 
-const planOf = (me, org) => me.plans_by_organization?.[org] || me.plan?.plan_v3 || ""
+// paid says a plan calls Zed's hosted models: any plan but none and Free.
+const paid = (plan) => typeof plan === "string" && plan !== "" && plan !== "zed_free"
+
+// planOf is the plan of the organization the models are asked under, as
+// Zed's editor reads it (user.rs plan): that organization's entry, none
+// when it has none, never the account's own plan in its place. Only a
+// reply with no organizations at all falls back to the account's plan.
+function planOf(me, org) {
+  const known = org && (me.organizations ?? []).some((o) => o?.id === org) && me.plans_by_organization && typeof me.plans_by_organization === "object"
+  if (known) return me.plans_by_organization[org] || ""
+  return me.plan?.plan_v3 || ""
+}
 
 function modelsOff(me, org) {
   const c = me.configuration_by_organization?.[org]
@@ -208,7 +230,49 @@ function stateOf(auth) {
   if (auth?.type !== "oauth" || !auth.access) return null
   const r = parse(auth.refresh ?? "")
   if (!r?.userId) return null
-  return { access: auth.access, userId: String(r.userId), systemId: r.systemId ?? "", org: r.org ?? "", plan: r.plan ?? "", who: auth.accountId ?? "" }
+  const s = { access: auth.access, userId: String(r.userId), systemId: r.systemId ?? "", org: r.org ?? "", saved: r.org ?? "", plan: r.plan ?? "", who: auth.accountId ?? "", auth }
+  // an organization picked again since this sign-in was saved, in case the
+  // save didn't reach it
+  const p = picked.get(s.userId)
+  if (p && p.from === s.org) s.org = p.to
+  return s
+}
+
+// picked is each account's organization picked again after the saved one
+// lost its plan: {from: the one its sign-in names, to: the new one}. Once
+// the sign-in is saved with the new one, from no longer matches.
+const picked = new Map()
+
+// withOrg is a sign-in with its organization and plan replaced.
+function withOrg(auth, org, plan) {
+  const r = parse(auth.refresh ?? "") ?? {}
+  return { ...auth, refresh: JSON.stringify({ ...r, org, plan, planName: planName(plan) }) }
+}
+
+// repick reads the account again after Zed refused its organization (a
+// 402: no active subscription) and moves it to one with a plan, if there
+// is one. It says whether the organization changed; s is moved, and the
+// sign-in saved with it when save is given.
+async function repick(s) {
+  let me
+  try {
+    me = parse(await cloud("GET", "/client/users/me", s, undefined, 15_000))
+  } catch {
+    return false
+  }
+  if (!me || typeof me !== "object") return false
+  const org = orgOf(me, s.org)
+  if (!org || org === s.org) return false
+  move(s, org, planOf(me, org))
+  return true
+}
+
+// move puts s under org, remembers it and saves it with the sign-in.
+function move(s, org, plan) {
+  picked.set(s.userId, { from: s.saved ?? "", to: org })
+  s.org = org
+  s.plan = plan
+  if (s.save && s.auth) Promise.resolve(s.save(withOrg(s.auth, org, plan))).catch(() => {})
 }
 
 // ---- the model token ------------------------------------------------------------
@@ -221,7 +285,8 @@ const minting = new Map()
 // modelToken is a live model token for s, minted anew when renew is set
 // (the last one was refused) or none is kept.
 async function modelToken(s, renew) {
-  const key = s.userId + " " + s.access
+  // a token is minted for one organization
+  const key = s.userId + " " + s.org + " " + s.access
   if (!renew && tokens.has(key)) return tokens.get(key)
   if (minting.has(key)) return minting.get(key)
   const run = (async () => {
@@ -263,27 +328,43 @@ function guess(model) {
 
 const vendorOf = (model) => vendors.get(model) ?? guess(model)
 
-// fetchModels reads GET /models, minting the token again once if it is stale.
+// fetchModels reads GET /models, minting the token again once if it is
+// stale, and moving the account once to an organization with a plan when
+// Zed refuses the one it is under (402) or lists nothing callable for it.
 async function fetchModels(s) {
+  let moved = false
   for (let t = 0; ; t++) {
-    const tok = await modelToken(s, t > 0)
-    const res = await fetch(CLOUD + "/models", {
-      headers: { Authorization: "Bearer " + tok, "x-zed-client-supports-x-ai": "true", "User-Agent": userAgent() },
-      signal: AbortSignal.timeout(15_000),
-    })
-    const text = await res.text()
-    if (!res.ok && t === 0 && stale(res.status, res.headers)) continue
-    if (!res.ok) throw new ZedStatus(res.status, text, res.headers)
-    return parseModels(text)
+    let out
+    try {
+      const tok = await modelToken(s, t > 0)
+      const res = await fetch(CLOUD + "/models", {
+        headers: { Authorization: "Bearer " + tok, "x-zed-client-supports-x-ai": "true", "User-Agent": userAgent() },
+        signal: AbortSignal.timeout(15_000),
+      })
+      const text = await res.text()
+      if (!res.ok && t === 0 && stale(res.status, res.headers)) continue
+      if (!res.ok) throw new ZedStatus(res.status, text, res.headers)
+      out = parseModels(text)
+    } catch (e) {
+      const refused = (e instanceof ZedStatus && e.status === 402) || e instanceof NothingListed
+      if (refused && !moved) {
+        moved = true
+        if (await repick(s)) continue
+      }
+      throw e
+    }
+    return out
   }
 }
+
+class NothingListed extends Error {}
 
 // parseModels is what /models lists that can be called, the disabled ones
 // and those of providers the plugin can't write left out.
 function parseModels(text) {
   const r = parse(text)
   const out = (r?.models ?? []).filter((m) => m && m.id && !m.is_disabled && NPM[m.provider])
-  if (!out.length) throw new Error("Zed lists no models for this account — its plan may not include Zed's hosted models (see zed.dev/account)")
+  if (!out.length) throw new NothingListed("Zed lists no models for this account — its plan may not include Zed's hosted models (see zed.dev/account)")
   for (const m of out) vendors.set(m.id, m.provider)
   return out
 }
@@ -378,15 +459,19 @@ async function signedInWith(key, uid, ciphertext, systemId) {
   const org = orgOf(me)
   if (modelsOff(me, org)) throw new Error("Zed: this account's organization has Zed's hosted models turned off")
   s.org = org
+  s.plan = planOf(me, org)
   s.who = who(me)
-  const plan = planOf(me, org)
   try {
-    lists.set(uid, { at: Date.now(), models: await fetchModels(s) })
+    const models = await fetchModels(s)
+    lists.set(uid, { at: Date.now(), org: s.org, models })
   } catch {}
+  // what this sign-in saves is the organization now, whatever was picked
+  // for the account before
+  picked.delete(uid)
   return {
     type: "success",
     access,
-    refresh: JSON.stringify({ userId: uid, systemId, org, plan, planName: planName(plan), login: me.user?.github_login || me.user?.username || "", name: me.user?.name ?? "" }),
+    refresh: JSON.stringify({ userId: uid, systemId, org: s.org, plan: s.plan, planName: planName(s.plan), login: me.user?.github_login || me.user?.username || "", name: me.user?.name ?? "" }),
     expires: 0,
     accountId: s.who,
   }
@@ -913,12 +998,26 @@ async function complete(s, url, init) {
   const { req: pr, stream = w.stream } = providerRequest(w.wire, req, id)
   const body = JSON.stringify({ provider: vendor, model: id, provider_request: pr })
   let res
-  for (let t = 0; ; t++) {
+  let renewed = false
+  let moved = false
+  // Zed refusing the organization (402, no active subscription) moves the
+  // account once to one with a plan and asks again (#232)
+  const another = async () => {
+    if (moved) return false
+    moved = true
+    return await repick(s)
+  }
+  for (;;) {
     let tok
     try {
-      tok = await modelToken(s, t > 0)
+      tok = await modelToken(s, renewed)
     } catch (e) {
       if (e instanceof SignInExpired) return errorResponse(w.wire, 401, e.message, "expired")
+      if (e instanceof ZedStatus && e.status === 402) {
+        if (await another()) continue
+        const [status, msg] = refusal(402, e.body)
+        return errorResponse(w.wire, status, msg)
+      }
       return errorResponse(w.wire, 502, String(e?.message ?? e).replace(/^Zed: /, ""))
     }
     res = await fetch(CLOUD + "/completions", {
@@ -935,9 +1034,16 @@ async function complete(s, url, init) {
       signal: init?.signal,
     })
     // a model token Zed calls stale is minted again, once
-    if (t === 0 && stale(res.status, res.headers)) {
+    if (!renewed && stale(res.status, res.headers)) {
       await res.body?.cancel?.().catch(() => {})
+      renewed = true
       continue
+    }
+    if (res.status === 402 && !moved) {
+      const text = await res.text()
+      if (await another()) continue
+      const [status, msg] = refusal(402, text)
+      return errorResponse(w.wire, status, msg)
     }
     break
   }
@@ -980,11 +1086,16 @@ async function usage(auth, save) {
     if (e?.status === 401) return { error: `${s.who}: the Zed sign-in has expired — sign in again`, signIn: "expired" }
     return { error: e?.message ?? String(e), signIn: "kept" }
   }
-  const plan = planOf(me, s.org || orgOf(me))
+  // the organization the account is under, picked again when it lost its
+  // plan (#232), and its plan, saved with the sign-in when either changed
+  const org = orgOf(me, s.org)
+  const plan = planOf(me, org)
   const out = { plan: planName(plan), signIn: "kept" }
-  if (plan !== s.plan && save) {
-    const r = parse(auth.refresh ?? "") ?? {}
-    await save({ ...auth, refresh: JSON.stringify({ ...r, plan, planName: out.plan }) }).catch(() => {})
+  if (org !== s.org) {
+    move(s, org, plan)
+    if (save) await save(withOrg(auth, org, plan)).catch(() => {})
+  } else if (plan !== s.plan && save) {
+    await save(withOrg(auth, s.org, plan)).catch(() => {})
   }
   const end = me.plan?.subscription_period?.ended_at
   if (typeof end === "string" && RFC3339.test(end) && !isNaN(Date.parse(end))) out.until = end
@@ -1000,6 +1111,8 @@ async function usage(auth, save) {
 // ---- the plugin ---------------------------------------------------------------------
 
 export async function ZedAuthPlugin({ client } = {}) {
+  // saves a sign-in under the account the call is for
+  const save = client?.auth?.set ? (body) => client.auth.set({ path: { id: PROVIDER }, body }) : null
   return {
     config: async (cfg) => {
       cfg.provider ??= {}
@@ -1018,10 +1131,14 @@ export async function ZedAuthPlugin({ client } = {}) {
       async models(provider, { auth } = {}) {
         const s = stateOf(auth)
         if (!s) return provider.models
+        s.save = save
         let l = lists.get(s.userId)
+        // a list is of one organization's models
+        if (l && l.org !== undefined && l.org !== s.org) l = undefined
         if (!l || Date.now() - l.at > MODELS_TTL) {
           try {
-            l = { at: Date.now(), models: await fetchModels(s) }
+            const models = await fetchModels(s)
+            l = { at: Date.now(), org: s.org, models }
             lists.set(s.userId, l)
           } catch (e) {
             // Zed refusing the account's own sign-in while its list was
@@ -1053,6 +1170,7 @@ export async function ZedAuthPlugin({ client } = {}) {
           async fetch(input, init) {
             const s = stateOf(await getAuth())
             if (!s) throw new Error("not signed in to Zed")
+            s.save = save
             const url = input instanceof Request ? input.url : String(input)
             if (input instanceof Request) init = { method: input.method, body: await input.text(), signal: input.signal, ...init }
             return complete(s, url, init)
@@ -1061,7 +1179,6 @@ export async function ZedAuthPlugin({ client } = {}) {
       },
       // magpie's own hook: the account's plan and its period
       async usage(getAuth) {
-        const save = client?.auth?.set ? (body) => client.auth.set({ path: { id: PROVIDER }, body }) : null
         return usage(await getAuth(), save)
       },
     },
@@ -1069,4 +1186,4 @@ export async function ZedAuthPlugin({ client } = {}) {
 }
 
 // for tests
-export const _internal = { said, eventError, stateOf, parseModels, entry, providerRequest, wireOf, refusal, failedStatus, decrypt, padded, signedInWith, complete, vendors, tokens, lists, orgOf, who, planName, usage }
+export const _internal = { said, eventError, stateOf, parseModels, entry, providerRequest, wireOf, refusal, failedStatus, decrypt, padded, signedInWith, complete, vendors, tokens, lists, orgOf, planOf, picked, who, planName, usage }

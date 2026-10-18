@@ -16,9 +16,29 @@ id: `zed`. Ported from magpie's built-in Zed account.
    user id and an access token encrypted to the key. The browser is then
    sent on to zed.dev's "signed in" page.
 4. The plugin asks Zed who the account is (`/client/users/me`). That gives
-   the organization the models are called under: the default one, else the
-   first. It also gives the plan. An organization with Zed's hosted models
-   turned off is refused.
+   the organization the models are called under, and its plan. An
+   organization with Zed's hosted models turned off is refused.
+
+## Organization
+
+Zed asks for a model token per organization. The Zed editor starts in the
+account's default organization and lets you switch to another from its
+title bar. The plugin has no switcher, so it picks the organization with a
+plan that calls models (any plan but Free), in this order (#232):
+
+1. the organization it saved before, while that one still has such a plan;
+2. the default organization, if it has one;
+3. the personal organization, if it has one;
+4. any other organization that has one.
+
+When none has such a plan, it keeps what Zed picks: the saved organization,
+else the default, else the first. The plan shown is the picked
+organization's own (none when Zed lists none for it), never the account's
+plan in its place. When Zed answers 402 for the organization a sign-in was
+saved under ("Organization does not have an active subscription"), the
+plugin reads the account again, moves to an organization with a plan if
+there is one, saves it with the sign-in, and asks once more. The plan card
+re-checks the organization the same way.
 
 The sign-in is kept as an `oauth` entry: `access` is the access token and
 `refresh` is JSON holding the user id, machine id, organization and plan.
