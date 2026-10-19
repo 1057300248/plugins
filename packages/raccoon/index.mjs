@@ -6,7 +6,8 @@
 // ~/.box-agent/config/auth.json (read-only). Chats are OpenAI-compatible chat
 // completions at /api/web/llm/v2/chat/completions.
 
-import { randomUUID } from "node:crypto"
+import { randomUUID, randomBytes } from "node:crypto"
+import { createServer } from "node:http"
 import { readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -736,7 +737,73 @@ function toSuccessAuth(access, refresh, extra = {}) {
   }
 }
 
-function browserSignIn() {
+async function browserSignIn(timeoutMs = 10 * 60 * 1000) {
+  // The current authorize page accepts desktop loopback callbacks only with
+  // a 64-character hex state and a 127.0.0.1 /auth/callback URL.
+  const state = randomBytes(32).toString("hex")
+  const url = new URL(buildAuthorizeUrl(state))
+  url.searchParams.set("desktop_callback", "loopback")
+  let complete, timer, origin, received = false, settled = false
+  const done = new Promise((resolve) => { complete = resolve })
+  const finish = (result) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    complete(result)
+    server.close()
+    server.closeIdleConnections?.()
+  }
+  const server = createServer(async (req, res) => {
+    const reply = (status, text) => {
+      res.writeHead(status, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "Content-Security-Policy": "default-src 'none'",
+      })
+      res.end(text)
+    }
+    const url = new URL(req.url || "/", "http://127.0.0.1")
+    if (req.headers.host !== origin || url.pathname !== "/auth/callback") return reply(404, "Not found")
+    if (req.method !== "GET") return reply(405, "Method not allowed")
+    const q = url.searchParams
+    if (q.getAll("state").length !== 1 || q.get("state") !== state) return reply(400, "回调不属于本次登录，请回到原授权页重试。")
+    if (settled || received) return reply(409, "本次回调已经处理，请回到 Magpie 查看结果。")
+    if (q.get("error")) {
+      reply(400, "登录未获授权，请回到 Magpie 重新登录。")
+      finish({ type: "failed", error: "商汤小浣熊授权被拒绝，请重新登录" })
+      return
+    }
+    const code = q.get("code") || ""
+    if (q.getAll("code").length !== 1 || !code || code.length > 4096) return reply(400, "回调缺少有效授权码，请回到原授权页重试。")
+    received = true
+    try {
+      const tokens = await exchangeAuthCode(code)
+      if (settled) return reply(408, "登录已超时，请回到 Magpie 重新登录。")
+      reply(200, "商汤小浣熊登录成功，可以关闭此页并返回 Magpie。")
+      finish(toSuccessAuth(tokens.access, tokens.refresh))
+    } catch (e) {
+      reply(502, "登录未完成，请返回 Magpie 查看错误并重新登录。")
+      finish({ type: "failed", error: e?.message ?? String(e) })
+    }
+  })
+  await new Promise((resolve, reject) => {
+    server.once("error", reject)
+    server.listen(0, "127.0.0.1", resolve)
+  })
+  origin = `127.0.0.1:${server.address().port}`
+  url.searchParams.set("redirect", `http://${origin}/auth/callback`)
+  timer = setTimeout(() => finish({ type: "failed", error: "商汤小浣熊登录超时，请重新登录" }), timeoutMs)
+  timer.unref?.()
+  return {
+    url: url.toString(),
+    instructions: "在浏览器完成商汤小浣熊登录并确认授权后，会自动返回此处；无需填写短信验证码或复制网页地址。",
+    method: "auto",
+    async callback() { return await done },
+  }
+}
+
+function manualSignIn() {
   const state = randomUUID()
   const url = buildAuthorizeUrl(state)
   return {
@@ -955,7 +1022,7 @@ export const RaccoonAuthPlugin = async ({ client }) => {
       methods: [
         {
           type: "oauth",
-          label: "商汤小浣熊账号 (浏览器登录 / 粘贴回调或 Token)",
+          label: "商汤小浣熊账号 (浏览器登录 / 自动返回)",
           authorize: async () => browserSignIn(),
         },
         {
@@ -963,12 +1030,18 @@ export const RaccoonAuthPlugin = async ({ client }) => {
           label: "商汤小浣熊桌面端登录态 (~/.box-agent/config/auth.json)",
           authorize: async () => desktopSignIn(),
         },
+        {
+          type: "oauth",
+          label: "手动粘贴回调链接或 Token（非短信验证码）",
+          authorize: async () => manualSignIn(),
+        },
       ],
     },
   }
 }
 
 export const _internal = {
+  browserSignIn,
   stripBearer,
   decodeJwtClaims,
   jwtExpiryMs,
