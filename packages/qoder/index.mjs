@@ -1708,9 +1708,8 @@ const makePlugin = (site) => async ({ client }) => {
     try {
       m = (await models(cred)).find((x) => x.key === chat.model) ?? (await models(cred, true)).find((x) => x.key === chat.model)
     } catch (e) {
-      // the built-in answered any failure to read the list 400
-      // (QoderModelOf), a refused one included, marking nothing
-      return errorResponse({ status: 400, message: e.message })
+      if (e instanceof SignInGone || e?.expired) return signedInError(e)
+      return errorResponse({ status: 502, message: e?.message ?? String(e) })
     }
     if (!m) return errorResponse({ status: 400, message: `unknown or disabled model "${chat.model}"` })
     const CHAT_URL = siteOf(site, cred).api + CHAT_PATH

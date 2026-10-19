@@ -181,16 +181,28 @@ test("other refusals keep their status and say nothing of the sign-in", async ()
   expect(_internal.failure(400, JSON.stringify({ message: "bad", details: { error: { message: "effort" } } }))).toEqual({ status: 400, message: "bad: effort" })
 })
 
-test("a model list Qoder won't give is a 400, as the built-in's QoderModelOf answered, the account unmarked", async () => {
+test("a model list Qoder won't give is a 502, the account unmarked", async () => {
   for (const status of [401, 403, 500]) {
     const auth = { ...account(), machineId: "m1" }
     globalThis.fetch = async () => new Response("no", { status })
     const hooks = await QoderAuthPlugin({ client: { auth: { set: async () => {} } } })
     const l = await hooks.auth.loader(async () => auth)
     const res = await l.fetch(API_CHAT, ASK)
-    expect([res.status, res.headers.get("X-Magpie-Sign-In")]).toEqual([400, null])
+    expect([res.status, res.headers.get("X-Magpie-Sign-In")]).toEqual([502, null])
     expect((await res.json()).error.message).toBe(`Qoder models: HTTP ${status}: no`)
   }
+})
+
+test("a network failure fetching the model list is a 502 so magpie can fall back", async () => {
+  const auth = { ...account(), machineId: "m1" }
+  globalThis.fetch = async () => {
+    throw new Error("getaddrinfo ENOTFOUND api3.qoder.sh")
+  }
+  const hooks = await QoderAuthPlugin({ client: { auth: { set: async () => {} } } })
+  const l = await hooks.auth.loader(async () => auth)
+  const res = await l.fetch(API_CHAT, ASK)
+  expect([res.status, res.headers.get("X-Magpie-Sign-In")]).toEqual([502, null])
+  expect((await res.json()).error.message).toBe("getaddrinfo ENOTFOUND api3.qoder.sh")
 })
 
 // the loader's fetch for an account whose job token is due, the refresh answered by refresh()
