@@ -229,6 +229,24 @@ token marker. Changed-file text supplied by hooks, quoted or incomplete
 notifications, and notices that omit the snippet are left alone. Model and
 environment metadata after non-startup hooks retain their existing adaptation.
 
+Claude Code's instructions reminder names `~/.claude/CLAUDE.md` "(user's
+private global instructions for all projects)", which Factory refuses; in
+the generated reminder it becomes "(global instructions)". Claude Code
+renders that reminder two ways: the first copy opens with "Codebase and user
+instructions are shown below", and a copy re-read after the files changed
+(after compaction, a settings sync and the like) opens with "Instruction
+files were re-read …; these differ from their earlier copies" or "These
+instruction files changed". Both are adapted, in text blocks, string user
+turns and chat completions' joined user text; text after the reminder and
+a user's own mention of the phrase stay as written. A tool result that
+quotes the phrase (reading Claude Code's renderer, say) gets the lossless
+JSON encoding above.
+
+When Factory still answers 403, the error magpie and the agent see keeps
+Factory's request id (from `x-request-id`, `request-id` or `cf-ray`, or the
+body) and its error code and type, and the Anthropic-route body carries
+`request_id`, so the refusal can be named to Factory.
+
 Use magpie's Claude Code integration to select the Factory provider.
 magpie manages the provider-specific client settings, including capability
 and permission configuration. Fields such as `safeguards` and

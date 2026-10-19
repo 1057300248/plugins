@@ -410,6 +410,28 @@ function explain(status, text) {
   return "Factory refused the request. magpie adapts fixed client metadata on both OpenAI and Anthropic routes. Factory may still refuse unsupported fields or wrappers; check the upstream error, the organization's model policy, plan and regional provider availability, and compare the same model in Droid"
 }
 
+// upstreamIds are what Factory's refusal says to tell it apart when asking
+// Factory about it (plugins#243): the request id from its headers or body,
+// and the error's own code and type. The headers go back as they came too.
+const REQUEST_ID_HEADERS = ["x-request-id", "request-id", "x-amzn-requestid", "cf-ray"]
+function upstreamIds(text, headers) {
+  let v
+  try {
+    v = JSON.parse(text)
+  } catch {}
+  const err = v && typeof v === "object" && v.error && typeof v.error === "object" ? v.error : {}
+  const str = (x) => (typeof x === "string" && /^[\x21-\x7e]{1,128}$/.test(x) ? x : undefined)
+  const id = str(v?.request_id) ?? str(v?.requestId) ?? str(err.request_id) ?? str(err.requestId) ??
+    REQUEST_ID_HEADERS.map((h) => str(headers?.get?.(h) ?? undefined)).find(Boolean)
+  const parts = []
+  if (id) parts.push("request id " + id)
+  const code = str(err.code) ?? str(v?.code)
+  if (code) parts.push("code " + code)
+  const type = str(err.type)
+  if (type) parts.push("type " + type)
+  return { id, said: parts.length ? " (upstream " + parts.join(", ") + ")" : "" }
+}
+
 // ---- opening as droid ---------------------------------------------------------
 //
 // Factory takes a subscription's model requests only from Droid (magpie
@@ -698,12 +720,14 @@ function tooLarge(text, left) {
 
 // errorReply is an error as the API the request was for words one:
 // Anthropic's on /llm/a/, OpenAI's on the others.
-function errorReply(url, status, type, message, headers = new Headers()) {
+function errorReply(url, status, type, message, headers = new Headers(), requestId) {
   headers.set("content-type", "application/json")
   headers.delete("content-length")
   headers.delete("content-encoding")
   const anthropic = new URL(url).pathname.includes("/llm/a/")
   const body = anthropic ? { type: "error", error: { type, message } } : { error: { message, type, code: null } }
+  // Anthropic's error body carries the request id beside the error
+  if (anthropic && requestId) body.request_id = requestId
   return new Response(JSON.stringify(body), { status, headers })
 }
 
@@ -1159,8 +1183,24 @@ function systemModelLine(text) {
 
 // The reminder carrying CLAUDE.md files names the global one with a phrase
 // Factory refuses; only that phrase in the generated reminder changes.
-const INSTRUCTIONS_REMINDER = "<system-reminder>\nCodebase and user instructions are shown below"
+// Claude Code renders the instructions attachment two ways (n_t in
+// 2.1.292/2.1.303): the first copy opens with the preamble, and a copy
+// re-read after the files changed (changed: true, with or without a
+// reason such as "compaction") opens with its own sentence before the same
+// "Contents of … (user's private global instructions for all projects):"
+// lines (plugins#243).
+const INSTRUCTIONS_REMINDER = /^<system-reminder>\n(?:Codebase and user instructions are shown below|(?:Instruction files were re-read [^\n]+; these differ from their earlier copies|These instruction files changed) \u2014 each replaces its earlier copy, and the instructions preamble above still applies:\nContents of )/
 const GLOBAL_INSTRUCTIONS = "(user's private global instructions for all projects)"
+// Only the reminder itself changes: text joined after its close (a chat
+// user message is a turn's blocks joined) stays as the user wrote it.
+function instructionsText(text) {
+  if (!INSTRUCTIONS_REMINDER.test(text)) return text
+  const close = text.indexOf("\n</system-reminder>")
+  const end = close < 0 ? text.length : close + "\n</system-reminder>".length
+  const reminder = text.slice(0, end)
+  if (!reminder.includes(GLOBAL_INSTRUCTIONS)) return text
+  return reminder.replaceAll(GLOBAL_INSTRUCTIONS, "(global instructions)") + text.slice(end)
+}
 
 // Claude Code (2.1.291 and later) restores skills invoked before compaction
 // as one generated reminder. Factory refuses that fixed opening, and the restored
@@ -1296,9 +1336,10 @@ function quotedToolText(text, prefix = QUOTED_TOOL_PREFIX) {
   if (![...CLAUDE_IDENTITIES].some((identity) => text.includes(identity)) &&
       !text.includes("You have been invoked in the following environment:") &&
       !text.includes("x-anthropic-billing-header: cc_version=") &&
-      !text.includes(COMPACT_OPENING)) return text
+      !text.includes(COMPACT_OPENING) &&
+      !text.includes(GLOBAL_INSTRUCTIONS)) return text
   let encoded = JSON.stringify(text)
-  for (const phrase of ["You are", "You have", "x-anthropic-billing-header", "system-reminder", COMPACT_OPENING]) {
+  for (const phrase of ["You are", "You have", "x-anthropic-billing-header", "system-reminder", COMPACT_OPENING, GLOBAL_INSTRUCTIONS]) {
     encoded = encoded.replaceAll(phrase, "\\u" + phrase.charCodeAt(0).toString(16).padStart(4, "0") + phrase.slice(1))
   }
   return prefix + encoded
@@ -1332,7 +1373,8 @@ function systemMessageText(text) {
 function userBlockText(text) {
   const compacted = compactContext(text)
   if (compacted !== text) return compacted
-  if (text.startsWith(INSTRUCTIONS_REMINDER) && text.includes(GLOBAL_INSTRUCTIONS)) return text.replaceAll(GLOBAL_INSTRUCTIONS, "(global instructions)")
+  const instructions = instructionsText(text)
+  if (instructions !== text) return instructions
   // a system message folded into the user's turn on its way here
   if (HOOK_OUTPUT.test(text) || SYSTEM_ENV_CONTEXT.test(text)) return systemContext(text)
   if (ENV_REMINDER.test(text)) {
@@ -1446,7 +1488,8 @@ function anthropicBody(body) {
     }
     if (message?.role !== "user") continue
     if (typeof message.content === "string") {
-      const adapted = compactContext(message.content)
+      const compacted = compactContext(message.content)
+      const adapted = compacted !== message.content ? compacted : instructionsText(message.content)
       if (adapted !== message.content) {
         message.content = adapted
         changed = true
@@ -1868,8 +1911,9 @@ export const FactoryAuthPlugin = async ({ client }) => {
               }
               const why = explain(res.status, text)
               // the refusal, then what to do about it, as provider.Explain joins them
-              const msg = `${vendorError(text, statusLine(res.status))} — ${why}`
-              return answer(errorReply(url, res.status, "permission_error", msg, new Headers(res.headers)))
+              const ids = upstreamIds(text, res.headers)
+              const msg = `${vendorError(text, statusLine(res.status))}${ids.said} — ${why}`
+              return answer(errorReply(url, res.status, "permission_error", msg, new Headers(res.headers), ids.id))
             } catch (e) {
               // Factory refused to renew the sign-in: the built-in failed the
               // request (magpie's 502) and marked the account lapsed
