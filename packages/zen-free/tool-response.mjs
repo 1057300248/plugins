@@ -250,6 +250,8 @@ function appendFunction(target, fragment) {
   if (!object(fragment)) throw new GuardError("Invalid upstream function delta");
   for (const [key, value] of Object.entries(fragment)) {
     if (key === "name" || key === "arguments") {
+      // Nullable stream fields carry no new bytes; keep prior fragments intact.
+      if (value == null) continue;
       if (typeof value !== "string") throw new GuardError("Invalid upstream function delta");
       target[key] = (target[key] ?? "") + value;
     } else {
