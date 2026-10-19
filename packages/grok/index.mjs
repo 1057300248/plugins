@@ -462,12 +462,24 @@ function modelOf(id) {
 
 // ---- sign-in ------------------------------------------------------------------
 
+// opensPage is whether `grok login --device-auth` opens its page in the
+// browser itself, which it does wherever it can: on macOS (NSWorkspace) and
+// Windows (ShellExecute) always, with nothing to turn it off; on Linux and
+// the BSDs through $BROWSER, else xdg-open where a display is. There it is
+// given a $BROWSER that opens nothing, and the one who asked (magpie, which
+// knows where the user's browser is) opens it; here the sign-in says the
+// page is open already, so it isn't opened a second time (andyfmyth on X:
+// "每次都会弹两次验证").
+const opensPage = () => process.platform === "darwin" || process.platform === "win32"
+
 // login runs `grok login --device-auth` in home and hands on the first link
 // it prints; done is settled when the command is.
 function login(exe, home) {
+  const env = envFor(home)
+  if (!opensPage()) env.BROWSER = "true"
   const child = spawn(exe, ["login", "--device-auth"], {
     cwd: homedir(),
-    env: envFor(home),
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   })
   const tail = []
@@ -533,6 +545,8 @@ async function signIn() {
   }
   return {
     url,
+    // not OpenCode's: the page is open already, by Grok Build itself
+    opened: opensPage(),
     instructions: "Approve the sign-in on the page; Grok Build finishes it.",
     method: "auto",
     callback: async () => {

@@ -28,6 +28,7 @@ afterAll(() => {
 async function signIn(body) {
   const bin = mkdtempSync(join(dir, "bin-"))
   symlinkSync("/bin/sh", join(bin, "grok"))
+  symlinkSync("/bin/sh", join(bin, "grok.exe")) // as a test that says it is Windows looks for it
   writeFileSync(script, `${body}\n`)
   const env = { GROK_BIN_DIR: process.env.GROK_BIN_DIR, GROK_HOME: process.env.GROK_HOME }
   process.env.GROK_BIN_DIR = bin
@@ -60,6 +61,43 @@ test.skipIf(process.platform === "win32")("a login that says nothing asks whethe
 test.skipIf(process.platform === "win32")("a login's link is still handed on", async () => {
   const a = await signIn(`echo 'To sign in, open this URL in your browser:'; echo '  https://accounts.x.ai/oauth2/device?user_code=AB12-CD34'; exit 1`)
   expect(a.url).toBe("https://accounts.x.ai/oauth2/device?user_code=AB12-CD34")
+})
+
+// `grok login --device-auth` opens its page itself where it can, and the
+// sign-in's opener opened it too: two pages every time (andyfmyth on X).
+// On macOS and Windows, where nothing turns Grok Build's off, the sign-in
+// says the page is open already; elsewhere Grok Build is given a $BROWSER
+// that opens nothing, and the page is the opener's to open.
+async function signInOn(platform, body) {
+  const was = Object.getOwnPropertyDescriptor(process, "platform")
+  const browser = process.env.BROWSER
+  delete process.env.BROWSER
+  Object.defineProperty(process, "platform", { ...was, value: platform })
+  try {
+    return await signIn(body)
+  } finally {
+    Object.defineProperty(process, "platform", was)
+    if (browser !== undefined) process.env.BROWSER = browser
+  }
+}
+
+// the link carries the $BROWSER Grok Build was given
+const saysBrowser = `echo "https://accounts.x.ai/oauth2/device?user_code=AB12-CD34&browser=$BROWSER"; exit 1`
+
+test.skipIf(process.platform === "win32")("on macOS and Windows the page Grok Build opened isn't opened again", async () => {
+  for (const os of ["darwin", "win32"]) {
+    const a = await signInOn(os, saysBrowser)
+    expect(a.opened).toBe(true)
+    expect(a.url).toBe("https://accounts.x.ai/oauth2/device?user_code=AB12-CD34&browser=")
+  }
+})
+
+test.skipIf(process.platform === "win32")("elsewhere Grok Build opens nothing and the page is the opener's", async () => {
+  for (const os of ["linux", "freebsd"]) {
+    const a = await signInOn(os, saysBrowser)
+    expect(a.opened).toBe(false)
+    expect(a.url).toBe("https://accounts.x.ai/oauth2/device?user_code=AB12-CD34&browser=true")
+  }
 })
 
 // A login that ends signed in is kept, or says where it looked and what it
