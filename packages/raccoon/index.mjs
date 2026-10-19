@@ -494,11 +494,24 @@ async function claimDesktopOnboardingGrant(token) {
   return { points: 0, settled: false }
 }
 
+// allBills is the account's whole bill history, newest first. The bills
+// endpoint ignores paging.offset and always says total 0, so it can only be
+// asked for the newest N rows; 200 covered under a day of an active account
+// and left out the large grants a balance is made of (plugins #223).
+async function allBills(token) {
+  let bills = null
+  for (const limit of [1000, 5000]) {
+    bills = await apiGetJson(`/api/web/points/v1/bills?paging.limit=${limit}&paging.offset=0`, token)
+    if (!Array.isArray(bills?.items) || bills.items.length < limit) break
+  }
+  return bills
+}
+
 async function queryUsage(token) {
   const [points, entitlement, bills] = await Promise.all([
     apiGetJson("/api/web/points/v1/balance", token),
     apiGetJson("/api/web/auth/v1/entitlement_info", token).catch(() => null),
-    apiGetJson("/api/web/points/v1/bills?paging.limit=200&paging.offset=0", token).catch(() => null),
+    allBills(token).catch(() => null),
   ])
   const avail = Math.floor(Number(points?.available_points) || 0)
 
