@@ -1122,7 +1122,7 @@ test("an auth entry is read the same however it was stored", () => {
 	expect(authOf(null).type).toBe("oauth")
 })
 
-// ---- pinUpstream: DeepSeek's models only through DeepSeek's own API -------------
+// ---- pinUpstream: DeepSeek's and GLM's models only through their makers' APIs --
 
 test("pinBody pins a DeepSeek model to DeepSeek's API, keeping the body's prefix", () => {
 	const { pinBody, pinned } = _internal
@@ -1132,32 +1132,53 @@ test("pinBody pins a DeepSeek model to DeepSeek's API, keeping the body's prefix
 	expect(JSON.parse(out).providerOptions).toEqual({ gateway: { only: ["deepseek"] } })
 	// off, another vendor's model, a free model, or the client's own options: as sent
 	expect(pinBody(body, JSON.parse(body), false)).toBe(body)
-	const glm = `{"model":"cline-pass/glm-5.3"}`
-	expect(pinBody(glm, JSON.parse(glm), true)).toBe(glm)
-	const free = `{"model":"cline-free/deepseek-v4.1-flash"}`
-	expect(pinBody(free, JSON.parse(free), true)).toBe(free)
-	const own = `{"model":"deepseek/deepseek-v4-pro","providerOptions":{"gateway":{"only":["fireworks"]}}}`
-	expect(pinBody(own, JSON.parse(own), true)).toBe(own)
+	for (const m of ["cline-pass/kimi-k3", "cline-pass/qwen3.8-max", "anthropic/claude-sonnet-5.5"]) {
+		const other = `{"model":"${m}"}`
+		expect(pinBody(other, JSON.parse(other), true)).toBe(other)
+	}
+	for (const m of ["cline-free/deepseek-v4.1-flash", "cline-free/glm-5.3-flash"]) {
+		const free = `{"model":"${m}"}`
+		expect(pinBody(free, JSON.parse(free), true)).toBe(free)
+	}
+	for (const own of [
+		`{"model":"deepseek/deepseek-v4-pro","providerOptions":{"gateway":{"only":["fireworks"]}}}`,
+		`{"model":"cline-pass/glm-5.3","providerOptions":{"gateway":{"order":["novita"]}}}`,
+	]) expect(pinBody(own, JSON.parse(own), true)).toBe(own)
 	expect(pinned(true, "DeepSeek/DeepSeek-V4-Pro")).toBe("deepseek")
 	expect(JSON.parse(pinBody(`{}`, {}, true))).toEqual({})
+})
+
+test("pinBody pins a GLM model to Z.ai's API, keeping the body's prefix", () => {
+	const { pinBody, pinned } = _internal
+	for (const m of ["cline-pass/glm-5.3", "cline-pass/glm-5.3-flash"]) {
+		const body = `{"model":"${m}","messages":[{"role":"user","content":"hi"}],"stream":true}`
+		const out = pinBody(body, JSON.parse(body), true)
+		expect(out.startsWith(body.slice(0, -1))).toBe(true)
+		expect(JSON.parse(out).providerOptions).toEqual({ gateway: { only: ["zai"] } })
+		expect(pinBody(body, JSON.parse(body), false)).toBe(body)
+	}
+	expect(pinned(true, "z-ai/GLM-5.3")).toBe("zai")
 })
 
 for (const [how, plugin, provider] of [
 	["the plugin's own option", { pinUpstream: true }, undefined],
 	["OpenCode's provider.cline.options", undefined, { id: "cline", options: { pinUpstream: true } }],
 ]) {
-	test(`pinUpstream set as ${how} pins DeepSeek requests, and only them`, async () => {
+	test(`pinUpstream set as ${how} pins DeepSeek and GLM requests, and only them`, async () => {
 		const { client: c } = client()
 		const hooks = await ClinePlugin({ client: c }, plugin)
 		serve([
 			[chatUrl, () => Response.json({ ok: true })],
 			[chatUrl, () => Response.json({ ok: true })],
+			[chatUrl, () => Response.json({ ok: true })],
 		])
 		const l = await hooks.auth.loader(async () => ({ type: "api", key: "ck" }), provider)
 		await l.fetch(chatUrl, chatInit({ model: "cline-pass/deepseek-v4-pro", messages: [] }))
+		await l.fetch(chatUrl, chatInit({ model: "cline-pass/glm-5.3", messages: [] }))
 		await l.fetch(chatUrl, chatInit({ model: "cline-pass/kimi-k3", messages: [] }))
 		expect(JSON.parse(calls[0].init.body).providerOptions).toEqual({ gateway: { only: ["deepseek"] } })
-		expect(JSON.parse(calls[1].init.body).providerOptions).toBeUndefined()
+		expect(JSON.parse(calls[1].init.body).providerOptions).toEqual({ gateway: { only: ["zai"] } })
+		expect(JSON.parse(calls[2].init.body).providerOptions).toBeUndefined()
 	})
 }
 

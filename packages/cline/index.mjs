@@ -774,14 +774,25 @@ function usageOf(me, balance, limits) {
 
 // ---- the plugin --------------------------------------------------------------------
 
-// pinned is the upstream a DeepSeek model of Cline's is pinned to when the
-// pinUpstream option is on (magpie's built-in ClinePass has the same tick):
-// Cline's gateway otherwise picks among the providers serving the model, and
-// some answer DeepSeek's models worse than DeepSeek's own API. A cline-free/
-// model is left to Cline, as is every model that isn't DeepSeek's.
+// MAKERS maps a model name's start to its maker's own upstream on Cline's
+// gateway (Vercel's AI Gateway, whose provider slugs these are:
+// ai-gateway.vercel.sh/v1/models/<model>/endpoints lists "deepseek" for
+// deepseek/deepseek-v4-pro and "zai" for zai/glm-5.3)
+const MAKERS = [
+	["deepseek", "deepseek"],
+	["glm", "zai"],
+]
+
+// pinned is the upstream a DeepSeek or GLM model of Cline's is pinned to when
+// the pinUpstream option is on (magpie's built-in ClinePass has the same
+// tick): DeepSeek's own API for DeepSeek's, Z.ai's for GLM. Cline's gateway
+// otherwise picks among the providers serving the model, and some answer
+// worse than the maker's own API, which also keeps the prompt cache. A
+// cline-free/ model is left to Cline, as is every other maker's model.
 function pinned(on, model) {
 	if (!on || typeof model !== "string" || model.startsWith("cline-free/")) return ""
-	return model.slice(model.lastIndexOf("/") + 1).toLowerCase().startsWith("deepseek") ? "deepseek" : ""
+	const name = model.slice(model.lastIndexOf("/") + 1).toLowerCase()
+	return MAKERS.find(([prefix]) => name.startsWith(prefix))?.[1] ?? ""
 }
 
 // pinBody is the request's body with providerOptions.gateway.only set to the

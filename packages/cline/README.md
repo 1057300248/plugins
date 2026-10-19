@@ -67,12 +67,13 @@ the balance, and limits read are kept when the balance can't be.
 Cline's gateway picks among the providers that serve a model. With the
 `pinUpstream` option on, a request for a DeepSeek model (`cline-pass/deepseek-…`,
 not the `cline-free/` ones) carries `"providerOptions": {"gateway": {"only":
-["deepseek"]}}`, so it is answered by DeepSeek's own API only — the same as
-magpie's built-in ClinePass tick. Other models, and a request with
+["deepseek"]}}`, so it is answered by DeepSeek's own API only, and one for a
+GLM model (`cline-pass/glm-…`) carries `["zai"]`, so it is answered by Z.ai's
+own API only — the same as magpie's built-in ClinePass tick. Other models, and a request with
 `providerOptions` of its own, go as sent. It is off by default. Turn it on:
 
-- in magpie: the provider's editor › Upstream › tick "DeepSeek models only
-  through DeepSeek's own upstream";
+- in magpie: the provider's editor › Upstream › tick "DeepSeek and GLM
+  models only from their makers' own APIs";
 - in OpenCode: `"provider": {"cline": {"options": {"pinUpstream": true}}}` in
   `opencode.json`, or the plugin's own options:
   `"plugin": [["@magpie-community/opencode-cline-auth", {"pinUpstream": true}]]`.
