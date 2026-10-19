@@ -50,6 +50,8 @@ const FLAGGED = [
   [/You are Cursor/gi, "You are the Cursor agent"],
   [/You are Cline/gi, "You are the Cline agent"],
   [/You are Qwen Code/gi, "You are the Qwen Code agent"],
+  [/You are ZCode/gi, "You are the ZCode agent"],
+  [/operating inside pi, a coding agent harness/gi, "operating inside the pi coding agent harness"],
 ];
 
 function unflagged(text) {
@@ -82,7 +84,7 @@ function unflag(messages) {
 }
 
 const REFUSED_HINT =
-  "AutoClaw refuses chats whose system prompt carries another agent's identity line (Claude Code, Codex, opencode, Cursor, Cline, Qwen Code, DeepSeek Harness); this plugin rewrites the ones it knows, so an unknown one needs another provider in this group";
+  "AutoClaw refuses chats whose system prompt carries another agent's identity line (Claude Code, Codex, opencode, Cursor, Cline, Qwen Code, ZCode, pi, DeepSeek Harness); this plugin rewrites the ones it knows, so an unknown one needs another provider in this group";
 
 async function explained(res) {
   if (res.status < 400) return res;

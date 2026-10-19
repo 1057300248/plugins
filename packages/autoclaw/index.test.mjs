@@ -163,6 +163,31 @@ test("every flagged line's replacement is one the gateway still takes", () => {
   expect(unflagged("Codex CLI is an open source project.")).not.toMatch(/Codex CLI/)
 })
 
+// ZCode (#245) and pi (#236) answered 406 on the CN managed gateway. The
+// fixtures are each reporter's identity line, byte for byte. #245's probes
+// found the gateway matching "You are ZCode" in any case, anywhere in the
+// text; pi's line wasn't probed, so its rewrite breaks "inside pi, a coding
+// agent harness" as a whole while keeping pi's name for the model.
+test("ZCode's and pi's identity lines are rewritten", () => {
+  const zcode = "You are ZCode, an interactive coding agent"
+  expect(unflagged(zcode)).toBe("You are the ZCode agent, an interactive coding agent")
+  expect(unflagged("Note: you are zcode here.")).toBe("Note: You are the ZCode agent here.")
+  for (const t of ["You are ZCode.", "you are zcode", `Intro.\n${zcode}.`]) {
+    expect(unflagged(t)).not.toMatch(/You are ZCode/i)
+  }
+
+  const pi = "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files."
+  expect(unflagged(pi)).toBe("You are an expert coding assistant operating inside the pi coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.")
+  expect(unflagged(pi)).not.toMatch(/inside pi|pi, a coding agent harness/i)
+
+  // the same text in, the same text out: a cached prompt prefix stays put
+  expect(unflagged(unflagged(pi))).toBe(unflagged(pi))
+  expect(unflagged(unflagged(zcode))).toBe(unflagged(zcode))
+
+  // Claude Code's line is left to its own entry, exactly as before
+  expect(unflagged("You are Claude Code, Anthropic's official CLI for Claude.")).toBe("You are the Claude Code CLI, Anthropic's official CLI for Claude.")
+})
+
 // The gateway reads the system prompt, not the chat: the caller's own words
 // in a user or assistant message stay as they are.
 test("unflag rewrites system and developer messages only", () => {
@@ -171,12 +196,18 @@ test("unflag rewrites system and developer messages only", () => {
     { role: "developer", content: [{ type: "text", text: "You are Cursor" }] },
     { role: "user", content: "You are Codex" },
     { role: "assistant", content: [{ type: "text", text: "Codex CLI is what I use" }] },
+    { role: "system", content: [{ type: "text", text: "You are ZCode, an interactive coding agent" }] },
+    { role: "user", content: "You are ZCode, an interactive coding agent" },
+    { role: "tool", content: "operating inside pi, a coding agent harness" },
   ]
   expect(unflag(messages)).toBe(true)
   expect(messages[0].content).toBe("You are the Claude Code CLI, Anthropic's official CLI for Claude.")
   expect(messages[1].content[0].text).toBe("You are the Cursor agent")
   expect(messages[2].content).toBe("You are Codex")
   expect(messages[3].content[0].text).toBe("Codex CLI is what I use")
+  expect(messages[4].content[0].text).toBe("You are the ZCode agent, an interactive coding agent")
+  expect(messages[5].content).toBe("You are ZCode, an interactive coding agent")
+  expect(messages[6].content).toBe("operating inside pi, a coding agent harness")
   // nothing left to change the second time
   expect(unflag(messages)).toBe(false)
 })
@@ -394,6 +425,32 @@ test("CN's managed gateway gets AutoClaw's official body and headers", async () 
     expect(res.headers.get("content-type")).toContain("application/json")
     const reply = await res.json()
     expect(reply.model).toBe("zai_auto-fast")
+  } finally { globalThis.fetch = realFetch }
+})
+
+// #245's surface: ZCode through autoclaw-cn's managed gateway. The system
+// text that leaves carries no "You are ZCode"; the user's own words do.
+test("CN's managed gateway gets ZCode's and pi's lines rewritten", async () => {
+  const realFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) })
+    return Response.json({ id: "x", object: "chat.completion", created: 1, model: "zaicoding_glm-5.3", choices: [{ index: 0, message: { role: "assistant", content: "OK" }, finish_reason: "stop" }] })
+  }
+  try {
+    const factory = await makePlugin("autoclaw-cn")
+    const hooks = await factory({ client: { auth: { set: async () => {} } } }, {})
+    const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "a1" }))
+    const zcode = "You are ZCode, an interactive coding agent"
+    const pi = "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files."
+    for (const system of [zcode, pi]) {
+      await loader.fetch("x", { body: JSON.stringify({ model: "zaicoding_glm-5.3", stream: false, messages: [{ role: "system", content: system }, { role: "user", content: system }] }) })
+      const sent = calls.at(-1).body
+      expect(calls.at(-1).url).toBe("https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw/chat/completions")
+      expect(sent.messages[0].content).toBe(`${OFFICIAL_SYSTEM_PROMPT}\n\n${unflagged(system)}`)
+      expect(sent.messages[0].content).not.toMatch(/You are ZCode|inside pi, a coding agent harness/i)
+      expect(sent.messages[1].content).toBe(system)
+    }
   } finally { globalThis.fetch = realFetch }
 })
 
