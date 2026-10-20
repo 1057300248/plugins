@@ -100,6 +100,9 @@ itself.
   - the account, AES-encrypted, with the key wrapped by Qoder's RSA key;
   - an MD5 signature;
   - the machine id and the client's headers.
+  - `Cosy-Version`: the worker runtime version that Qoder's desktop app
+    ships (1.1.69 in app 0.4.8, since 0.2.23, #281), because
+    `Cosy-ClientType` says the desktop app.
 
 **Reading the reply**
 
