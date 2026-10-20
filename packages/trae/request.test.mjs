@@ -5,6 +5,9 @@ import { afterEach, expect, test } from "bun:test"
 import { TraeCNAuthPlugin, _internal } from "./index.mjs"
 import { fakeTrae, json, signedIn, sse } from "./fake.mjs"
 
+// the tools named natively in the body: past calls then go back as Trae's own turns
+const TOOLS_ON = [{ type: "function", function: { name: "read", parameters: { type: "object" } } }]
+
 let f
 afterEach(() => f?.close())
 
@@ -51,7 +54,7 @@ test("the request is the IDE's: its headers, the device, text parts, the tools n
 })
 
 test("tool history goes back as the turns Trae made: a call and its result", () => {
-  const m = _internal.traeMessages({ messages: [
+  const m = _internal.traeMessages({ tools: TOOLS_ON, messages: [
     { role: "user", content: "read a" },
     { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: "{\"path\":\"a\"}" } }] },
     { role: "tool", tool_call_id: "c1", content: "AAA" },
@@ -65,7 +68,7 @@ test("tool history goes back as the turns Trae made: a call and its result", () 
 
 test("an assistant turn folds into the calls turn after it, and parallel calls join one list", () => {
   // what agents send: a "let me read" turn, then the call
-  const a = _internal.traeMessages({ messages: [
+  const a = _internal.traeMessages({ tools: TOOLS_ON, messages: [
     { role: "user", content: "read a" },
     { role: "assistant", content: "let me read" },
     { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: "{\"path\":\"a\"}" } }] },
@@ -76,7 +79,7 @@ test("an assistant turn folds into the calls turn after it, and parallel calls j
   expect(a[1].tool_calls.map((c) => c.id)).toEqual(["c1"])
 
   // parallel calls split over two assistant turns (magpie#1275)
-  const b = _internal.traeMessages({ messages: [
+  const b = _internal.traeMessages({ tools: TOOLS_ON, messages: [
     { role: "user", content: "read a and b" },
     { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: "{\"path\":\"a\"}" } }] },
     { role: "assistant", content: null, tool_calls: [{ id: "c2", type: "function", function: { name: "read", arguments: "{\"path\":\"b\"}" } }] },
@@ -89,7 +92,7 @@ test("an assistant turn folds into the calls turn after it, and parallel calls j
 })
 
 test("a call with no name is dropped, and the result it would answer", () => {
-  const a = _internal.traeMessages({ messages: [
+  const a = _internal.traeMessages({ tools: TOOLS_ON, messages: [
     { role: "user", content: "do it" },
     { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "  ", arguments: "{}" } }] },
     { role: "tool", tool_call_id: "c1", content: "RESULT" },
@@ -102,7 +105,7 @@ test("a call with no name is dropped, and the result it would answer", () => {
   expect(a.some((x) => x.role === "tool")).toBe(false)
 
   // a named call beside an unnamed one keeps its own
-  const b = _internal.traeMessages({ messages: [
+  const b = _internal.traeMessages({ tools: TOOLS_ON, messages: [
     { role: "user", content: "do both" },
     { role: "assistant", content: null, tool_calls: [
       { id: "c1", type: "function", function: { name: "", arguments: "{}" } },
@@ -117,7 +120,7 @@ test("a call with no name is dropped, and the result it would answer", () => {
 })
 
 test("an assistant turn that loses every call keeps its text", () => {
-  const m = _internal.traeMessages({ messages: [
+  const m = _internal.traeMessages({ tools: TOOLS_ON, messages: [
     { role: "user", content: "hi" },
     { role: "assistant", content: "thinking out loud", tool_calls: [{ id: "c1", type: "function", function: { name: "", arguments: "{}" } }] },
     { role: "user", content: "ok" },
@@ -127,15 +130,47 @@ test("an assistant turn that loses every call keeps its text", () => {
   expect(m[1].tool_calls).toBeUndefined()
 })
 
-test("a result for a call the history doesn't carry, and two in a row, keep their own turns", () => {
-  const m = _internal.traeMessages({ messages: [
+test("a result for a call the history doesn't carry goes as text, after the results that answer calls", () => {
+  const m = _internal.traeMessages({ tools: TOOLS_ON, messages: [
     { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: "{}" } }] },
     { role: "tool", tool_call_id: "c1", content: "AAA" },
     { role: "tool", tool_call_id: "c2", content: "BBB" },
   ] })
-  expect(m.map((x) => x.role)).toEqual(["assistant", "tool", "tool"])
+  // a tool turn naming no call sent is not a turn Trae takes
+  expect(m.map((x) => x.role)).toEqual(["assistant", "tool", "user"])
   expect(m[1].content[0].text).toBe("AAA")
-  expect(m[2].content[0].text).toBe("BBB")
+  expect(m[2].content[0].text).toBe("Result of the tool (call c2):\nBBB")
+})
+
+test("a result with no output says so: Trae refuses an empty one (4027)", () => {
+  const m = _internal.traeMessages({ tools: TOOLS_ON, messages: [
+    { role: "user", content: "touch a and b" },
+    { role: "assistant", content: null, tool_calls: [
+      { id: "c1", type: "function", function: { name: "read", arguments: "{}" } },
+      { id: "c2", type: "function", function: { name: "read", arguments: "{}" } },
+    ] },
+    { role: "tool", tool_call_id: "c1", content: "" },
+    { role: "tool", tool_call_id: "c2", content: [] },
+  ] })
+  expect(m.map((x) => x.role)).toEqual(["user", "assistant", "tool", "tool"])
+  expect(m[2].content).toEqual([{ type: "text", text: "(no output)" }])
+  expect(m[3].content).toEqual([{ type: "text", text: "(no output)" }])
+})
+
+test("without tools in the body, past calls and results go back as text, as they always did", () => {
+  const msgs = [
+    { role: "user", content: "read a" },
+    { role: "assistant", content: "let me read", tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: "{\"path\":\"a\"}" } }] },
+    { role: "tool", tool_call_id: "c1", content: "AAA" },
+    { role: "user", content: "sum it up" },
+  ]
+  for (const req of [{ messages: msgs }, { tools: TOOLS_ON, tool_choice: "none", messages: msgs }]) {
+    const m = _internal.traeMessages(req)
+    expect(m.map((x) => x.role)).toEqual(["user", "assistant", "user"])
+    expect(m.some((x) => x.tool_calls || x.role === "tool")).toBe(false)
+    expect(m[1].content[0].text).toBe('let me read\n<tool_call>{"name":"read","arguments":{"path":"a"}}</tool_call>')
+    expect(m[2].content[0].text).toBe("Result of read (call c1):\nAAA\n\nsum it up")
+  }
 })
 
 test("a stream: text, reasoning, a tool block split across events, a native call, usage", async () => {

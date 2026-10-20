@@ -10,6 +10,9 @@ import { afterEach, expect, test } from "bun:test"
 import { TraeCNAuthPlugin, _internal } from "./index.mjs"
 import { fakeTrae, json, signedIn, sse } from "./fake.mjs"
 
+// the tools named natively in the body: past calls then go back as Trae's own turns
+const TOOLS_ON = [{ type: "function", function: { name: "read", parameters: { type: "object" } } }]
+
 let f
 afterEach(() => f?.close())
 
@@ -70,7 +73,7 @@ test("a model Trae marks text-only is told of the image, not sent it", async () 
 })
 
 test("an image alone, a tool's image and two user turns in a row keep every image in order", () => {
-  const m = _internal.traeMessages({ messages: [
+  const m = _internal.traeMessages({ tools: TOOLS_ON, messages: [
     { role: "user", content: [{ type: "image_url", image_url: { url: PNG } }] },
     { role: "user", content: [{ type: "text", text: "and this" }, { type: "image_url", image_url: "https://example.invalid/b.png" }] },
     { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "shot", arguments: "{}" } }] },
@@ -85,7 +88,7 @@ test("an image alone, a tool's image and two user turns in a row keep every imag
   expect(m[3].content).toEqual([{ type: "image_url", image_url: { url: PNG } }])
 
   // the images of parallel results come out after every result, in order
-  const p = _internal.traeMessages({ messages: [
+  const p = _internal.traeMessages({ tools: TOOLS_ON, messages: [
     { role: "user", content: [{ type: "text", text: "two shots" }] },
     { role: "assistant", content: null, tool_calls: [
       { id: "c1", type: "function", function: { name: "shot", arguments: "{}" } },
@@ -95,7 +98,7 @@ test("an image alone, a tool's image and two user turns in a row keep every imag
     { role: "tool", tool_call_id: "c2", content: [{ type: "text", text: "second" }, { type: "image_url", image_url: { url: "https://example.invalid/b.png" } }] },
   ] }, true)
   expect(p.map((x) => x.role)).toEqual(["user", "assistant", "tool", "tool", "user"])
-  expect(p[2].content).toEqual([{ type: "text", text: "" }])
+  expect(p[2].content).toEqual([{ type: "text", text: "(the result's image follows)" }])
   expect(p[3].content).toEqual([{ type: "text", text: "second" }])
   expect(p[4].content).toEqual([{ type: "image_url", image_url: { url: PNG } }, { type: "image_url", image_url: { url: "https://example.invalid/b.png" } }])
 })

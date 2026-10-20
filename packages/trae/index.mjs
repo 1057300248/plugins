@@ -963,6 +963,11 @@ const partsOf = (content, sees) => {
 // the model takes images: Trae's list says so of each model (multimodal),
 // and a model it says doesn't is sent the placeholder, not the image.
 function traeMessages(req, sees = false) {
+  // native is whether the body names the tools to Trae (chatBody's own
+  // test). Past calls go back as Trae's own turns only then: every live
+  // run of that shape carried the tools, and a request without them (a
+  // summary, tool_choice "none") keeps the text form it always had
+  const native = Array.isArray(req.tools) && req.tools.length > 0 && req.tool_choice !== "none"
   const names = new Map()
   const out = []
   // dropped is every call id a turn carried but Trae cannot be sent: an
@@ -978,6 +983,18 @@ function traeMessages(req, sees = false) {
   for (const m of req.messages ?? []) {
     const role = m.role === "developer" ? "system" : m.role
     let { text, images } = partsOf(m.content, sees)
+    if (!native && role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const calls = m.tool_calls.map((c) => {
+        names.set(String(c.id ?? ""), c.function?.name)
+        let args = c.function?.arguments ?? "{}"
+        try {
+          args = JSON.parse(args)
+        } catch {}
+        return OPEN + JSON.stringify({ name: c.function?.name, arguments: args }) + CLOSE
+      })
+      out.push({ role: "assistant", text: [text, ...calls].filter(Boolean).join("\n") })
+      continue
+    }
     if (role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
       // a past call goes back as the turn Trae made it: an assistant
       // tool_calls message, its result in the tool message after it. Trae
@@ -1015,13 +1032,22 @@ function traeMessages(req, sees = false) {
     } else if (role === "tool") {
       const id = String(m.tool_call_id ?? "")
       if (dropped.has(id)) continue
+      // a result answering no call this history sends (the text form, or
+      // a call cut away before it) is no turn Trae takes: it goes as text
+      if (!native || !names.has(id)) {
+        flushImages()
+        out.push({ role: "user", text: `Result of ${names.get(id) || m.name || "the tool"} (call ${m.tool_call_id ?? "?"}):\n${text}`, images })
+        continue
+      }
       // Trae's own result turn: the call it answers, its text as parts
       // (an empty one for a result with no text). Its images wait: a
       // tool turn's image_url reaches some models (Kimi) and not others
       // (Doubao-Seed), so they go in a user message after the whole run
       // of results, which every multimodal model reads
       if (images.length) pending.push(...images)
-      out.push({ role: "tool", tool_call_id: id, text })
+      // Trae refuses a result with no text (4027: the calls turn reads as
+      // unanswered), so one that printed nothing says so (plugins#251)
+      out.push({ role: "tool", tool_call_id: id, text: text || (images.length ? "(the result's image follows)" : "(no output)") })
     } else {
       flushImages()
       out.push({ role: role === "system" ? "system" : "user", text, images })
@@ -1065,7 +1091,7 @@ function traeMessages(req, sees = false) {
   return merged.map((m) => {
     const content = [...(m.text ? [{ type: "text", text: m.text }] : []), ...(m.images ?? [])]
     if (m.calls) return { role: "assistant", content: content.length ? content : null, tool_calls: m.calls }
-    if (m.role === "tool") return { role: "tool", tool_call_id: m.tool_call_id, content: content.length ? content : [{ type: "text", text: "" }] } // results of one turn stay consecutive: nothing may go between them (11148)
+    if (m.role === "tool") return { role: "tool", tool_call_id: m.tool_call_id, content } // results of one turn stay consecutive: nothing may go between them (11148)
     return { role: m.role, content }
   })
 }

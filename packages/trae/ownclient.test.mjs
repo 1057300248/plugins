@@ -159,6 +159,9 @@ test("where each OS keeps the client's storage.json", () => {
     "/h/AppData/Roaming/Trae CN/User/globalStorage/storage.json",
     "/h/AppData/Roaming/trae-cn/User/globalStorage/storage.json",
   ])
+  // the same folder spelled with another case, separator or a trailing one
+  // is still that folder (the fix: string equality read it twice)
+  expect(same(p("win32", "/h", { APPDATA: "\\H\\APPDATA\\roaming\\" })).length).toBe(2)
   // and a different APPDATA is a root of its own, beside the home's
   expect(same(p("win32", "/h", { APPDATA: "/other/Roam" }))).toEqual([
     "/other/Roam/Trae CN/User/globalStorage/storage.json",

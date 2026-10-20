@@ -136,6 +136,14 @@ agent's `POST https://trae-api-cn.mchost.guru/api/agent/v3/llm_utils_chat`:
   - A call with no name is dropped, and the `tool` result answering it
     with it: Trae requires the name, and an empty `tool_calls` list with a
     result naming no call is not a turn it takes.
+  - A result with no text goes as `(no output)` (`(the result's image
+    follows)` when it had only an image): Trae refuses the whole request
+    with 4027 when a result's text is empty, reading the calls turn as
+    unanswered (measured on Trae CN in #251). A result answering no call
+    the history sends goes back as text in a `user` turn.
+  - A request that names no tools to Trae (none sent, or `tool_choice:
+    "none"`, such as a summary) sends its past calls and results as text,
+    as before: every live run of the native turns carried the tools.
   - GLM also writes its own template, `<tool_call>name<arg_key>k</arg_key>
     <arg_value>v</arg_value></tool_call>` (a string kept as written, other
     types read as JSON), and sometimes a whole call into a native call's
