@@ -1504,7 +1504,10 @@ const SITES = {
     web: "https://qoder.com",
     openapi: "https://openapi.qoder.sh",
     api: "https://api3.qoder.sh",
-    redirect: "qoder-app://",
+    // none, as Qoder's CLI (@qoder-ai/qodercli 1.1.75) sends: the desktop
+    // app's qoder-app:// hands the finished page to Qoder.app, when it is
+    // installed, instead of leaving it in the tab while this polls (#276)
+    redirect: "",
     models: MODELS,
   },
   "qoder-cn": {

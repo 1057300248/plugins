@@ -22,6 +22,11 @@ hosts; [its section](#qoder-cn) says what differs.
 3. The device token is traded for a job token, and the account's email and
    name are read.
 
+The page is asked for no `redirect_uri`, as Qoder's CLI asks for none, so
+the sign-in ends in the browser tab even when Qoder.app is installed
+(before 0.2.25 it sent the desktop app's `qoder-app://`, which handed the
+page to Qoder.app).
+
 **Sign in with Qoder PAT** (and **Sign in with Qoder CN PAT**) skips the
 device flow: a Personal Access Token from `<site>/account/integrations` is
 posted to `/api/v1/jobToken/exchange` (`personal_token`), which answers a
@@ -178,7 +183,7 @@ Qoder CN's own CLI builds in for its `cn` build (`@qodercn-ai/qoderclicn`
 | Accounts: poll, tokens, user info, usage | openapi.qoder.sh | openapi.qoder.com.cn |
 | Models and chat | api3.qoder.sh | gateway.qoder.com.cn |
 | Device-flow client id | Qoder's desktop client's | Qoder CN's CLI's (production) |
-| `redirect_uri` on the sign-in page | `qoder-app://` | none, as the CLI sends |
+| `redirect_uri` on the sign-in page | none, as Qoder's CLI sends (since 0.2.25) | none, as the CLI sends |
 
 Qoder CN's CLI chats with the device token itself and never makes a job
 token. The plugin asks qoder.cn for a job token first, as it does on
