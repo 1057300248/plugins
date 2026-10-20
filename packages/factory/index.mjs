@@ -403,10 +403,28 @@ async function reconcile(c) {
 // "Requested active organization is not accessible by this user".
 const orgRefused = (status, text) => status === 403 && text.toLowerCase().includes("active organization is not accessible")
 
+// contentRefused is Factory's usage policy check refusing what the request
+// says, not who sent it: a 403 with code "content_policy_rejected" (droid
+// 0.245.0 tells it apart the same way, and only when Factory sent no
+// x-factory-upstream-error header). Its check reads the whole conversation,
+// so sending the request again, under any org, is refused again.
+function contentRefused(status, text, headers) {
+  if (status !== 403 || headers?.get?.("x-factory-upstream-error")) return false
+  let v
+  try {
+    v = JSON.parse(text)
+  } catch {
+    return false
+  }
+  const err = v && typeof v === "object" && v.error && typeof v.error === "object" ? v.error : {}
+  return v?.code === "content_policy_rejected" || err.code === "content_policy_rejected"
+}
+
 // explain is what the user can do about a 403 Factory still answers once
 // the request carries what droid sends.
-function explain(status, text) {
+function explain(status, text, headers) {
   if (status !== 403) return ""
+  if (contentRefused(status, text, headers)) return "Factory's usage policy check reads the whole conversation, so this session's requests are refused again until the text that tripped it is gone: start a new session, or remove or reword what the conversation quotes (another agent's system prompt or instructions pasted in a message or a tool's output are the usual cause)"
   if (orgRefused(status, text)) return "the Factory account's organization changed; remove the account in magpie and sign in to it again"
   return "Factory refused the request. magpie adapts fixed client metadata on both OpenAI and Anthropic routes. Factory may still refuse unsupported fields or wrappers; check the upstream error, the organization's model policy, plan and regional provider availability, and compare the same model in Droid"
 }
@@ -2020,12 +2038,12 @@ export const FactoryAuthPlugin = async ({ client }) => {
               if (res.status === 413) return answer(await smaller(res))
               if (res.status !== 403) return answer(res)
               let text = await res.text()
-              if (await mendOrg(res.status, text, onRenew).catch(() => false)) {
+              if (!contentRefused(res.status, text, res.headers) && (await mendOrg(res.status, text, onRenew).catch(() => false))) {
                 res = await send(input, init, body, onRenew)
                 if (res.status !== 403) return answer(res)
                 text = await res.text()
               }
-              const why = explain(res.status, text)
+              const why = explain(res.status, text, res.headers)
               // the refusal, then what to do about it, as provider.Explain joins them
               const ids = upstreamIds(text, res.headers)
               const msg = `${vendorError(text, statusLine(res.status))}${ids.said} — ${why}`
@@ -2044,4 +2062,4 @@ export const FactoryAuthPlugin = async ({ client }) => {
 }
 
 // for tests
-export const _internal = { fastBody, FAST_BETA, limitWindows, windowEnd, dollars, vendorError, CORE, droidBody, DROID_LINE, geminiBody, leaveOutAttachments, LEFT_OUT, TOO_LARGE_HINT, MODELS, PROMOTIONS, rateOf, configModels, providerModel, providerModels }
+export const _internal = { contentRefused, explain, fastBody, FAST_BETA, limitWindows, windowEnd, dollars, vendorError, CORE, droidBody, DROID_LINE, geminiBody, leaveOutAttachments, LEFT_OUT, TOO_LARGE_HINT, MODELS, PROMOTIONS, rateOf, configModels, providerModel, providerModels }
