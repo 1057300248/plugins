@@ -570,3 +570,44 @@ test("CN passes SSE through and marks 401 expired", async () => {
     expect(expired.headers.get("X-Magpie-Sign-In")).toBe("expired")
   } finally { globalThis.fetch = realFetch }
 })
+
+// #254: two sign-ins can share AutoClaw's default display name. The
+// usage-path signing (signinOnUsage) is remembered per sign-in, by uid or
+// by the refresh token when an old account has none, never per provider,
+// so the second account of a provider is still signed in that day.
+test("signinOnUsage signs every account, also two with the same name", async () => {
+  const realFetch = globalThis.fetch
+  const signed = []
+  const done = new Set()
+  globalThis.fetch = async (input, init) => {
+    const url = String(input)
+    const who = new Headers(init?.headers).get("Authorization")
+    if (url.includes("autoclaw-task-complete")) {
+      signed.push(who)
+      done.add(who)
+      return Response.json({ code: 0, data: { success: true, reward_points: 400 } })
+    }
+    if (url.includes("autoclaw-task-list")) {
+      return Response.json({ code: 0, data: [{ task_id: "daily_signin", status: done.has(who) ? "completed" : "pending", reward_points: 400 }] })
+    }
+    return Response.json({ code: 0, data: { total_balance: 1000, wallets: [] } })
+  }
+  try {
+    const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } }, { signin: true, signinOnUsage: true })
+    const accounts = [
+      { type: "oauth", access: "a1", refresh: "r1", accountId: "AutoClaw用户", uid: "u1" },
+      { type: "oauth", access: "a2", refresh: "r2", accountId: "AutoClaw用户", uid: "u2" },
+      { type: "oauth", access: "a3", refresh: "r3", accountId: "AutoClaw用户" },
+      { type: "oauth", access: "a4", refresh: "r4", accountId: "AutoClaw用户" },
+    ]
+    for (const a of accounts) {
+      const u = await hooks.auth.usage(async () => a)
+      expect(u.windows.find((w) => w.name === "每日签到").display).toBe("今日已签 ✓ +400")
+    }
+    expect(signed).toEqual(["Bearer a1", "Bearer a2", "Bearer a3", "Bearer a4"])
+    expect(_internal.signinAccountKey("autoclaw", accounts[0])).toBe("autoclaw|uid:u1")
+    expect(_internal.signinAccountKey("autoclaw", accounts[2])).not.toBe(_internal.signinAccountKey("autoclaw", accounts[3]))
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
