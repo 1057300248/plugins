@@ -111,6 +111,31 @@ async function explained(res) {
   );
 }
 
+// A 403 is not always the sign-in: the CN managed gateway answers an
+// exhausted quota 403 {"code":810000,"message":"GLM-5.3 免费额度已用完,…"}
+// while the same token's next request with an unknown model gets as far as
+// "非法模型" (plugins#274). Such a refusal is the account's quota: it goes on
+// as a 429 with the gateway's own words, and the sign-in is kept.
+const QUOTA_CODES = new Set(["810000"]);
+const QUOTA_WORDS = /额度|余额不足|用完|用尽|quota|insufficient[_ ]?(balance|credit)|exhausted/i;
+
+/** quotaRefusal is a 403 chat answer read as a spent quota, or null when it isn't one (a 401 or any other 403 is still the sign-in). */
+async function quotaRefusal(res) {
+  if (res.status !== 403) return null;
+  const text = await res.clone().text().catch(() => "");
+  let d;
+  try { d = JSON.parse(text); } catch { return null; }
+  if (!d || typeof d !== "object") return null;
+  const code = d.code ?? d.error?.code ?? null;
+  const message = String(d.message ?? d.msg ?? d.error?.message ?? "").trim();
+  if (!QUOTA_CODES.has(String(code)) && !(message && QUOTA_WORDS.test(message))) return null;
+  try { res.body?.cancel?.(); } catch {}
+  return new Response(JSON.stringify({ error: { message: `AutoClaw: ${message || "quota exhausted"}`, type: "rate_limit_error", code } }), {
+    status: 429,
+    headers: { "Content-Type": "application/json", "X-Magpie-Sign-In": "kept" },
+  });
+}
+
 function autoclawRewriteBody(rawBody) {
   let payload;
   try {
@@ -625,7 +650,13 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
 
               const res1 = await tryFetch(hosts[0]);
               if (res1.status !== 401 && res1.status !== 403) return explained(res1);
+              // a spent quota is the account's on every host: not asked again
+              const spent1 = await quotaRefusal(res1);
+              if (spent1) return spent1;
+              try { res1.body?.cancel?.(); } catch {}
               const res2 = await tryFetch(hosts[1]);
+              const spent2 = await quotaRefusal(res2);
+              if (spent2) return spent2;
               if (res2.status === 401 || res2.status === 403) {
                 try { res2.body?.cancel?.(); } catch {}
                 return new Response(JSON.stringify({ error: { message: "AutoClaw 登录已失效（两个 host 均拒绝该 token）", type: "invalid_request_error" } }), {
@@ -647,6 +678,8 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
               body: JSON.stringify(payload),
             });
             if (res.status !== 401 && res.status !== 403) return explained(res);
+            const spent = await quotaRefusal(res);
+            if (spent) return spent;
             try { res.body?.cancel?.(); } catch {}
             return new Response(JSON.stringify({ error: { message: "AutoClaw 登录已失效", type: "invalid_request_error" } }), {
               status: 401,
@@ -1219,6 +1252,7 @@ export const AutoclawCnAuthPlugin = makeAutoclawPlugin({
 
 /** 测试辅助（magpie/OpenCode 不会把它当插件调用）。 */
 export const _internal = {
+  quotaRefusal,
   makePluginForTest: makeAutoclawPlugin,
   md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinAccountKey, signinConfig, checkinOutcome, refreshTokens,

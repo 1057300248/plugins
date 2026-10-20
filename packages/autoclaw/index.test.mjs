@@ -611,3 +611,64 @@ test("signinOnUsage signs every account, also two with the same name", async () 
     globalThis.fetch = realFetch
   }
 })
+
+// plugins#274: the CN managed gateway answers a spent quota with a 403 whose
+// body says so (code 810000); the same token's next request gets as far as
+// the model check, so it is the quota, not the sign-in
+const SPENT = { code: 810000, message: "GLM-5.3 免费额度已用完,开通连续包月会员继续使用" }
+
+test("CN chat: a 403 for a spent quota is a 429 with the gateway's words, and the sign-in is kept", async () => {
+  const realFetch = globalThis.fetch
+  let answer = () => Response.json(SPENT, { status: 403 })
+  globalThis.fetch = async () => answer()
+  try {
+    const hooks = await AutoclawCnAuthPlugin({ client: { auth: { set: async () => {} } } })
+    const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "a1" }))
+    const body = JSON.stringify({ model: "zaicoding_glm-5.3", messages: [{ role: "user", content: "hi" }] })
+    const spent = await loader.fetch("x", { method: "POST", body })
+    expect(spent.status).toBe(429)
+    expect(spent.headers.get("X-Magpie-Sign-In")).toBe("kept")
+    const e = (await spent.json()).error
+    expect(e.message).toBe("AutoClaw: GLM-5.3 免费额度已用完,开通连续包月会员继续使用")
+    expect(e.code).toBe(810000)
+
+    // any other 403, and a 401, is still the sign-in
+    for (const [status, raw] of [[403, ""], [403, '{"code":401,"message":"token invalid"}'], [401, JSON.stringify(SPENT)]]) {
+      answer = () => new Response(raw, { status })
+      const dead = await loader.fetch("x", { method: "POST", body })
+      expect(dead.status).toBe(401)
+      expect(dead.headers.get("X-Magpie-Sign-In")).toBe("expired")
+    }
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("overseas chat: a spent quota on the first host isn't asked of the second, and isn't the sign-in", async () => {
+  const realFetch = globalThis.fetch
+  const urls = []
+  let answer = () => Response.json(SPENT, { status: 403 })
+  globalThis.fetch = async (input) => {
+    urls.push(String(input))
+    return answer()
+  }
+  try {
+    const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } })
+    const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "a1" }))
+    const body = JSON.stringify({ model: "zai_glm-5.3-flash", messages: [{ role: "user", content: "hi" }] })
+    const spent = await loader.fetch("x", { method: "POST", body })
+    expect(spent.status).toBe(429)
+    expect(spent.headers.get("X-Magpie-Sign-In")).toBe("kept")
+    expect(urls.length).toBe(1)
+
+    // both hosts refusing the token is still the sign-in
+    urls.length = 0
+    answer = () => new Response("forbidden", { status: 403 })
+    const dead = await loader.fetch("x", { method: "POST", body })
+    expect(dead.status).toBe(401)
+    expect(dead.headers.get("X-Magpie-Sign-In")).toBe("expired")
+    expect(urls.length).toBe(2)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
