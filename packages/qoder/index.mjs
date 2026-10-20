@@ -357,6 +357,10 @@ async function patSignIn(site, pat) {
   return {
     type: "success",
     ...chat,
+    // The same name its browser sign-in takes: magpie's plugin host replaces
+    // an account on a new sign-in when both the accountId and the uid match,
+    // so a renewed PAT sign-in must keep naming the same account. A suffix
+    // here would add a second row beside the lapsed one instead.
     accountId: email || uid,
     uid,
     email,
@@ -1636,8 +1640,14 @@ const makePlugin = (site) => async ({ client }) => {
     const method = String(init.method ?? input?.method ?? "GET").toUpperCase()
     try {
       const machine = site.id === "qoder" ? await machineForCampaign(cred.uid) : {}
-      let res = await campaignCall(url, method, body, cred.deviceToken, machine, init.signal)
-      if (res.status === 401 || res.status === 403) res = await campaignCall(url, method, body, await deviceToken(getAuth, cred.deviceToken), machine, init.signal)
+      // A PAT account has no device token: its job token signs the campaigns
+      // pages too, as it does the usage read. Nothing is rotated on that
+      // path — the refusal is the answer.
+      const patToken = cred.patAuth && !cred.deviceToken
+      const token = patToken ? cred.access : cred.deviceToken
+      let res = await campaignCall(url, method, body, token, machine, init.signal)
+      if (!patToken && (res.status === 401 || res.status === 403))
+        res = await campaignCall(url, method, body, await deviceToken(getAuth, cred.deviceToken), machine, init.signal)
       return signed(res, renewed(cred))
     } catch (e) {
       if (e?.expired) return signedInError(e)
@@ -1659,8 +1669,15 @@ const makePlugin = (site) => async ({ client }) => {
     if (!base) return { outcome: "inactive", message: "no campaigns page for this account" }
     try {
       const machine = site.id === "qoder" ? await machineForCampaign(cred.uid) : {}
+      // A PAT account has no device token: the campaigns pages take the job
+      // token the exchange gave, as the usage endpoint does. A live Qoder CN
+      // PAT account answered 200 to the list and CLAIMED to a claim, so the
+      // check-in works there as it does on a device-token account. That path
+      // has no second token to rotate, so a refusal is the answer.
+      const patToken = cred.patAuth && !cred.deviceToken ? cred.access : ""
       const call = async (url, method, body) => {
-        let res = await campaignCall(url, method, body, cred.deviceToken, machine)
+        let res = await campaignCall(url, method, body, patToken || cred.deviceToken, machine)
+        if (patToken) return res
         if (res.status === 401 || res.status === 403) {
           const token = await deviceToken(getAuth, cred.deviceToken)
           const current = latest(await getAuth())
@@ -1809,38 +1826,35 @@ const makePlugin = (site) => async ({ client }) => {
         { type: "oauth", label: `Sign in with ${site.name}`, authorize: () => deviceSignIn(site) },
         // PAT sign-in: exchange a Personal Access Token for a job token,
         // bypassing the OAuth device flow. PATs last up to 1 year.
-        // Not offered on Qoder CN: its CLI uses device chat directly and
-        // never makes a job token, so a PAT exchange may not produce one
-        // the chat endpoint accepts.
-        ...(site.id !== "qoder-cn"
-          ? [
-              {
-                type: "oauth",
-                label: `Sign in with ${site.name} PAT`,
-                prompts: [
-                  {
-                    type: "password",
-                    key: "pat",
-                    message: "Your Qoder Personal Access Token (from qoder.com/account/integrations)",
-                    placeholder: "pt-...",
-                    validate: (v) => (String(v ?? "").trim().startsWith("pt-") ? undefined : "PAT must start with pt-"),
-                  },
-                ],
-                authorize: (inputs) => {
-                  const pat = String(inputs?.pat ?? "").trim()
-                  if (!pat) throw new Error("enter your Personal Access Token")
-                  return {
-                    url: `${site.web}/account/integrations`,
-                    instructions: `Create a PAT at ${site.web}/account/integrations if you don't have one`,
-                    method: "auto",
-                    async callback() {
-                      return patSignIn(site, pat)
-                    },
-                  }
-                },
+        // Offered on both sites: Qoder CN's /api/v1/jobToken/exchange takes
+        // a PAT too (verified: HTTP 200 and a jt- token), and that job token
+        // signs the model list and chat calls with the COSY envelope as on
+        // qoder.com, so the exchange gives a token the chat endpoint accepts.
+        {
+          type: "oauth",
+          label: `Sign in with ${site.name} PAT`,
+          prompts: [
+            {
+              type: "password",
+              key: "pat",
+              message: `Your ${site.name} Personal Access Token (from ${site.web}/account/integrations)`,
+              placeholder: "pt-...",
+              validate: (v) => (String(v ?? "").trim().startsWith("pt-") ? undefined : "PAT must start with pt-"),
+            },
+          ],
+          authorize: (inputs) => {
+            const pat = String(inputs?.pat ?? "").trim()
+            if (!pat) throw new Error("enter your Personal Access Token")
+            return {
+              url: `${site.web}/account/integrations`,
+              instructions: `Create a PAT at ${site.web}/account/integrations if you don't have one`,
+              method: "auto",
+              async callback() {
+                return patSignIn(site, pat)
               },
-            ]
-          : []),
+            }
+          },
+        },
         // an enterprise VPC instance (Qoder CN), a method of its own so
         // that the sign-in above asks nothing new
         ...(site.vpcDomain

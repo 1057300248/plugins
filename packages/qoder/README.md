@@ -22,6 +22,31 @@ hosts; [its section](#qoder-cn) says what differs.
 3. The device token is traded for a job token, and the account's email and
    name are read.
 
+**Sign in with Qoder PAT** (and **Sign in with Qoder CN PAT**) skips the
+device flow: a Personal Access Token from `<site>/account/integrations` is
+posted to `/api/v1/jobToken/exchange` (`personal_token`), which answers a
+job token, its refresh token and its expiry. The PAT is kept on the
+credential, so a lapsed job refresh is exchanged again instead of asking
+for the sign-in; PATs last up to a year. The job token signs the model list
+and chat calls with the same COSY envelope either sign-in's does.
+
+On Qoder CN this is the plugin's own reading of the protocol rather than
+the CLI's path: qoder.cn's CLI signs requests with its device token and
+never asks for a job token. Verified against a live qoder.cn account — the
+exchange answers 200 with a `jt-` token, the signed model list answers 200
+with that account's own models, and a chat completion returns its text.
+
+A PAT account keeps the name its browser sign-in takes (`email || uid`): magpie
+replaces an account on a new sign-in when both the accountId and the uid
+match, so a renewed PAT sign-in names the same account rather than adding a
+row beside the lapsed one.
+
+A PAT account has no device token, so its usage read, campaigns pages and
+daily check-in go out on the job token instead. The check-in works on it: a
+live PAT account answered 200 to the campaigns list and `CLAIMED` to a claim,
+so it earns the daily credits the browser sign-in does. That path has no
+second token to rotate, so a refused call is the answer rather than a retry.
+
 What is kept: the job token, its refresh token and expiry, the uid, the
 device token and a machine id made for this sign-in. OpenCode keeps them in
 `auth.json`; magpie keeps them in `plugin-auth.json`.
