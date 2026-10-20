@@ -83,6 +83,10 @@ Each chat carries WorkBuddy's headers:
 A chat that doesn't open with a system message is given WorkBuddy's
 default one, as the app does.
 
+WorkBuddy refuses some agents' identity lines as an "unapproved channel"
+(11128), so those lines are reworded before a chat goes out. Since 0.1.27
+(#279) that includes DeepSeek Harness's opening line.
+
 The loader also translates OpenAI-compatible request spellings WorkBuddy
 doesn't take: `max_completion_tokens` becomes `max_tokens`, `developer`
 messages become `system`, and an object `tool_choice` becomes WorkBuddy's
