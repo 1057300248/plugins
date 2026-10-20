@@ -81,6 +81,10 @@ itself.
   - Messages become text and image blocks.
   - Tool calls and results become OpenAI tool turns. Images a tool returned
     follow in a user turn.
+  - A result whose id the client lost answers its turn's call in order
+    (since 0.2.22, #277): Qoder refuses a whole request with a result that
+    answers no call before it. A result with no call left to answer goes
+    as text in the user's turn.
   - Your tools become Qoder's native function tools.
   - The model's own configuration from Qoder's list goes with it.
 - It picks the reasoning effort from the model's own levels:
