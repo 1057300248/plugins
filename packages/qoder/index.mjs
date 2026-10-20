@@ -849,6 +849,14 @@ const QUOTA_CODES = new Set(["110", "112", "113", "114", "115", "116", "117", "1
 // supported, input too long, too many media, a custom model's service
 const REQUEST_CODES = new Set(["406", "416", "430", "80411", "80412", "100400", "100401", "100403"])
 const BUSY_WAIT = 30
+// UPSTREAM_FAILED is Qoder saying the model's own vendor behind it failed:
+// "Error in upstream response", which Qoder sends as a 400 (SlouchyQuill507
+// on Discord, qoder-cn). Nothing is wrong with the request or the account,
+// so it is a 502, which magpie asks again or of another account, not a
+// 400 that ends the turn as the client's fault. A request too long for the
+// model fails the same way, and magpie tells that one apart by its size
+// (tooLongUnsaid), at 502 as at 400.
+const UPSTREAM_FAILED = /\berror in upstream response\b/i
 
 function failure(status, text) {
   if (status < 400 || status > 599) status = 502
@@ -894,6 +902,7 @@ function failure(status, text) {
   }
   if (QUOTA_CODES.has(code)) return { status: 429, message: "usage limit reached: " + msg, signIn: "" }
   if (REQUEST_CODES.has(code)) return { status: 400, message: `Qoder refused the request (${code}): ${msg}`, signIn: "" }
+  if (UPSTREAM_FAILED.test(msg)) return { status: 502, message: msg, signIn: "" }
   // a refused chat is the built-in's 401, which never marked the account
   // lapsed: only a refused refresh did (errorResponse says kept). Qoder's
   // own words go with it: a 401 right after signing in isn't a lapsed
