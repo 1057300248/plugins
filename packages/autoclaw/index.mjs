@@ -42,6 +42,12 @@ const OFFICIAL_SYSTEM_PROMPT = 'You are AutoClaw. Answer the user directly and c
 const WALLETS_PATH = `/agent-assetmgr/api/v2/wallets?biz_app_id=${PRODUCT}`;
 
 const FLAGGED = [
+  // Claude Code 2.1.30x opens with an SDK identity line, not the CLI one;
+  // the CN gateway refuses "Claude Agent SDK" in any case with 406. Take the
+  // trailing period and the article/possessive so the replacement reads as
+  // a sentence, not "assistant.." or "Anthropic's the agent framework".
+  [/You are a Claude agent, built on Anthropic's Claude Agent SDK\.?/gi, "You are a coding assistant."],
+  [/(?:Anthropic's |the )?Claude Agent SDK/gi, "the agent framework"],
   [/You are an AI agent powered by DeepSeek Harness/gi, "You are an AI agent powered by DeepSeek-Harness"],
   [/You are Claude Code/gi, "You are the Claude Code CLI"],
   [/You are Codex/gi, "You are the Codex agent"],
@@ -84,7 +90,7 @@ function unflag(messages) {
 }
 
 const REFUSED_HINT =
-  "AutoClaw refuses chats whose system prompt carries another agent's identity line (Claude Code, Codex, opencode, Cursor, Cline, Qwen Code, ZCode, pi, DeepSeek Harness); this plugin rewrites the ones it knows, so an unknown one needs another provider in this group";
+  "AutoClaw refuses chats whose system prompt carries another agent's identity line (Claude Code, Claude Agent SDK, Codex, opencode, Cursor, Cline, Qwen Code, ZCode, pi, DeepSeek Harness); this plugin rewrites the ones it knows, so an unknown one needs another provider in this group";
 
 async function explained(res) {
   if (res.status < 400) return res;
@@ -628,7 +634,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
               headers,
               body: JSON.stringify(payload),
             });
-            if (res.status !== 401 && res.status !== 403) return res;
+            if (res.status !== 401 && res.status !== 403) return explained(res);
             try { res.body?.cancel?.(); } catch {}
             return new Response(JSON.stringify({ error: { message: "AutoClaw 登录已失效", type: "invalid_request_error" } }), {
               status: 401,
