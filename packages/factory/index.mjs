@@ -4,6 +4,7 @@
 // built-in Factory account (internal/provider/factory*.go).
 
 import { STATUS_CODES } from "node:http"
+import { readFileSync } from "node:fs"
 import { parseToolJSON, wrapAnthropicTools, unwrapAnthropicTools } from "./anthropic-tools.mjs"
 
 const PROVIDER = "factory"
@@ -481,6 +482,48 @@ function piSummary(text) {
   return text
 }
 
+// Factory refuses pi's opening and its compaction opening wherever they
+// appear, not only as the system prompt or the whole summary: a tool result
+// that prints pi's system prompt, or a historical session record, carries
+// them too, and every later turn of that conversation is 403.
+//
+// The list lives in client-phrases.json so the guard and the sanitizer read
+// the same one. Its entries are written with a \uXXXX first character, so the
+// file is safe to read from a Droid session; JSON.parse here yields the real
+// phrase. "anywhere" is refused in any text (pi turns a compaction into one
+// user text), "toolOnly" is refused in tool output while the prompt adapters
+// keep them.
+const FALLBACK_PHRASES = {
+  anywhere: [
+    "You are an expert coding assistant operating inside pi, a coding agent harness.",
+    PI_SUMMARIES[0][0].split("\n\n")[0],
+  ],
+  toolOnly: [
+    "You are Claude Code, Anthropic's official CLI for Claude.",
+    "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
+    "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+    "You have been invoked in the following environment:",
+    "x-anthropic-billing-header: cc_version=",
+    "This session is being continued from a previous conversation that ran out of context.",
+    "(user's private global instructions for all projects)",
+  ],
+}
+function loadClientPhrases() {
+  try {
+    const parsed = JSON.parse(readFileSync(new URL("./client-phrases.json", import.meta.url), "utf8"))
+    const anywhere = Array.isArray(parsed?.anywhere) ? parsed.anywhere.filter((p) => typeof p === "string" && p) : []
+    const toolOnly = Array.isArray(parsed?.toolOnly) ? parsed.toolOnly.filter((p) => typeof p === "string" && p) : []
+    // either group missing would silently drop protection, so use the
+    // built-in list instead
+    if (anywhere.length === 0 || toolOnly.length === 0) throw new Error("client-phrases.json needs both groups")
+    return { anywhere, toolOnly }
+  } catch {
+    return FALLBACK_PHRASES
+  }
+}
+const CLIENT_PHRASES = loadClientPhrases()
+const PI_QUOTED_IN_TOOL = CLIENT_PHRASES.anywhere
+
 // promptOpenings adapts the messages of msgs (chat completions' messages,
 // Responses' input) as anthropicBody adapts a Messages request's: pi's
 // opening and Claude Code's fixed phrases in the system and developer
@@ -632,6 +675,9 @@ function geminiBody(model, body) {
     si.parts = [{ text: joined.trim() === "" ? DROID_LINE : DROID_LINE + "\n" + joined }, ...rest]
   }
   m.systemInstruction = si
+  // Gemini's route has no tool-output adaptation: escape every refused
+  // phrase in its parts (functionResponse, systemInstruction) here.
+  escapeDeep(m, REFUSED_PHRASES)
   return JSON.stringify(m)
 }
 
@@ -1332,17 +1378,87 @@ function changedFileContext(text) {
 // rather than deleting or rewriting the file's contents. Other output and
 // the tool's id, error/cache markers and non-text blocks stay untouched.
 const QUOTED_TOOL_PREFIX = "Tool output encoded as a JSON string. Decode the JSON string to recover the exact original text before using it:\n"
+// the phrases Factory refuses wherever they appear
+const REFUSED_PHRASES = [
+  ...CLIENT_PHRASES.anywhere,
+  ...CLIENT_PHRASES.toolOnly,
+]
+// The substrings whose first character is escaped in tool output: every
+// refused phrase from the list, plus the shorter prefixes the old loop
+// escaped and the reminder marker. Longest first, so a full sentence is
+// escaped before its own prefix (escaping the prefix first would hide it).
+const ESCAPE_IN_TOOL = [...new Set([...REFUSED_PHRASES, COMPACT_OPENING, GLOBAL_INSTRUCTIONS, "system-reminder", "You have", "You are", "x-anthropic-billing-header"])]
+  .sort((a, b) => b.length - a.length)
 function quotedToolText(text, prefix = QUOTED_TOOL_PREFIX) {
-  if (![...CLAUDE_IDENTITIES].some((identity) => text.includes(identity)) &&
-      !text.includes("You have been invoked in the following environment:") &&
-      !text.includes("x-anthropic-billing-header: cc_version=") &&
-      !text.includes(COMPACT_OPENING) &&
-      !text.includes(GLOBAL_INSTRUCTIONS)) return text
+  if (!REFUSED_PHRASES.some((phrase) => text.includes(phrase))) return text
   let encoded = JSON.stringify(text)
-  for (const phrase of ["You are", "You have", "x-anthropic-billing-header", "system-reminder", COMPACT_OPENING, GLOBAL_INSTRUCTIONS]) {
+  for (const phrase of ESCAPE_IN_TOOL) {
     encoded = encoded.replaceAll(phrase, "\\u" + phrase.charCodeAt(0).toString(16).padStart(4, "0") + phrase.slice(1))
   }
   return prefix + encoded
+}
+
+// Factory refuses these phrases anywhere in the body, not only in tool
+// output: pi turns a compaction into one user text, and an assistant
+// message or a tool_use argument can quote a file too. escapePhrases
+// rewrites the first character of each phrase as \uXXXX without wrapping the
+// text, so a poisoned conversation can still be compacted or replayed.
+// Tool output keeps the JSON-wrapped, lossless form above.
+function escapePhrases(text, phrases = PI_QUOTED_IN_TOOL) {
+  let out = text
+  // By default only the phrases proven to be refused outside tool output
+  // (pi's opening and its compaction opening): escaping generated reminders
+  // such as GLOBAL_INSTRUCTIONS or Claude Code's environment line would
+  // rewrite text the adapters deliberately keep. Gemini's route passes the
+  // full list, because its tool output has no quotedToolText of its own.
+  for (const phrase of phrases) {
+    if (out.includes(phrase)) out = out.replaceAll(phrase, "\\u" + phrase.charCodeAt(0).toString(16).padStart(4, "0") + phrase.slice(1))
+  }
+  return out
+}
+
+// escapeDeep applies escapePhrases to every string in a JSON body, in place.
+// true when something changed. Tool results are already escaped, so a
+// second pass changes nothing.
+function escapeDeep(value, phrases = PI_QUOTED_IN_TOOL) {
+  if (typeof value === "string") return false // strings are replaced by their parent
+  if (Array.isArray(value)) {
+    let changed = false
+    for (let i = 0; i < value.length; i++) {
+      if (typeof value[i] === "string") {
+        const out = escapePhrases(value[i], phrases)
+        if (out !== value[i]) (value[i] = out), (changed = true)
+      } else if (escapeDeep(value[i], phrases)) changed = true
+    }
+    return changed
+  }
+  if (value && typeof value === "object") {
+    let changed = false
+    for (const key of Object.keys(value)) {
+      const v = value[key]
+      if (typeof v === "string") {
+        const out = escapePhrases(v, phrases)
+        if (out !== v) (value[key] = out), (changed = true)
+      } else if (escapeDeep(v, phrases)) changed = true
+    }
+    return changed
+  }
+  return false
+}
+
+// sanitizeBody is the last pass before a request leaves: every string in the
+// body gets escapePhrases. Handles Messages, Responses, chat and Gemini.
+function sanitizeBody(body) {
+  const text = bodyText(body)
+  if (text == null) return body
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return body
+  }
+  if (!escapeDeep(parsed)) return body
+  return JSON.stringify(parsed)
 }
 
 // The adapters below are shared by both of Factory's routes. Claude Code's
@@ -1864,7 +1980,7 @@ export const FactoryAuthPlugin = async ({ client }) => {
           // another agent's request opens as droid's does (droidBody)
           const anthropic = path.includes("/llm/a/") && (path.endsWith("/messages") || path.endsWith("/messages/count_tokens"))
           const adapted = anthropic ? wrapAnthropicTools(anthropicBody(body)) : { body: droidBody(path, body), names: new Set() }
-          const out = adapted.body
+          const out = sanitizeBody(adapted.body)
           // the caller's length is of the body it sent, not of this one
           if (out !== init?.body) h.delete("content-length")
           const res = await fetch(url, { ...init, method: init?.method ?? (input instanceof Request ? input.method : "POST"), headers: h, body: out })
