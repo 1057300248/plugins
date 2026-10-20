@@ -1015,7 +1015,7 @@ async function* sseLines(body) {
 async function* events(body) {
   const a = new Splitter()
   let index = -1 // the tool call being given
-  let native = -1 // the native tool call being assembled
+  const native = new Map() // upstream index -> call and its output index
   // one piece of the split text as an event: a call, text, or a call that
   // can't be read, which ends the turn as a 502
   const piece = (f) =>
@@ -1055,16 +1055,29 @@ async function* events(body) {
     // tool calls served the OpenAI way keep Qoder's id: a result answers it
     for (const tc of delta.tool_calls ?? []) {
       const i = Number(tc.index ?? 0)
-      if (i !== native) {
-        native = i
+      const name = typeof tc.function?.name === "string" ? tc.function.name.trim() : ""
+      const args = tc.function?.arguments ?? ""
+      if (!tc.id && !name && !args) continue
+      let call = native.get(i)
+      if (!call) {
+        call = { id: "", args: "" }
+        native.set(i, call)
+      }
+      if (tc.id) call.id = tc.id
+      if (call.index === undefined) {
+        // An id or arguments can arrive before the name. Never emit an
+        // unnamed tool: clients persist it and other providers reject it.
+        call.args += args
+        if (!name) continue
         for (const f of a.flush()) {
           const e = piece(f)
           yield e
           if (e.error) return
         }
         a.sawTool = true
-        yield { tool: { index: ++index, id: tc.id || "call_" + hexID(), name: tc.function?.name ?? "", args: tc.function?.arguments ?? "" } }
-      } else if (tc.function?.arguments) yield { args: { index, text: tc.function.arguments } }
+        call.index = ++index
+        yield { tool: { index: call.index, id: call.id || "call_" + hexID(), name, args: call.args } }
+      } else if (args) yield { args: { index: call.index, text: args } }
     }
     fr = chunk?.choices?.[0]?.finish_reason || fr
     // the usage comes in a chunk of its own after the finish, with no
@@ -1084,6 +1097,10 @@ async function* events(body) {
     const e = piece(f)
     yield e
     if (e.error) return
+  }
+  if ([...native.values()].some((call) => call.index === undefined)) {
+    yield { error: { status: 502, message: "the model's native tool call has no name; it is not sent on as a tool" } }
+    return
   }
   yield { stop: a.sawTool ? "tool_calls" : fr === "length" ? "length" : "stop", usage }
 }
@@ -1111,7 +1128,7 @@ async function answer(res, chat) {
       if (e.text) msg.content += e.text
       if (e.reasoning) reasoning += e.reasoning
       if (e.tool) calls.push({ id: e.tool.id, type: "function", function: { name: e.tool.name, arguments: e.tool.args } })
-      if (e.args) calls[calls.length - 1].function.arguments += e.args.text
+      if (e.args) calls[e.args.index].function.arguments += e.args.text
       if (e.stop) [stop, usage] = [e.stop, e.usage]
     }
     if (reasoning) msg.reasoning_content = reasoning
