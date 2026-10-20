@@ -1461,6 +1461,21 @@ function priceOf(d, promotions, now = Date.now()) {
   return { free: base === 0, rate: base }
 }
 
+// effortsOf are the levels a config model takes. Most list them in
+// reasoning.supportedEfforts; some (fast-model, deepseek-v4.1-flash, kimi-k3,
+// gemini-3.5-flash … on both sites, plugins#255) say only supportsReasoning
+// and a default reasoning.effort. Those take low, high and max (each
+// reasoned under a real account, on four of them) and their own default.
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"]
+function effortsOf(d) {
+  const said = d.reasoning?.supportedEfforts
+  if (Array.isArray(said) && said.length) return said
+  if (d.supportsReasoning !== true) return []
+  const own = d.reasoning?.effort
+  const set = new Set(["low", "high", "max", ...(typeof own === "string" && EFFORT_ORDER.includes(own) ? [own] : [])])
+  return EFFORT_ORDER.filter((e) => set.has(e))
+}
+
 async function liveModels(site, a) {
   const headers = new Headers()
   sign(site, a, headers)
@@ -1483,7 +1498,7 @@ async function liveModels(site, a) {
         m.output = d.maxOutputTokens
         m.images = d.supportsImages === true && !textOnly(site, id)
         Object.assign(m, priceOf(d, cfg.modelPromotions))
-        const es = d.reasoning?.supportedEfforts ?? []
+        const es = effortsOf(d)
         if (es.length) {
           const canOff = d.reasoning?.canDisableThinking
           m.efforts = [...(!d.onlyReasoning && (canOff == null || canOff) ? ["none"] : []), ...es]
