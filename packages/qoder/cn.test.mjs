@@ -173,7 +173,8 @@ const chatServer = (machines, refresh) => (at, { req, body, url }) => {
     const q = JSON.parse(_internal.decodeBody(body))
     expect(q.model_config.key).toBe("performance")
     expect(q.parameters.reasoning_effort).toBe("high")
-    expect(q.messages.at(-1)).toEqual({ role: "user", content: [{ type: "text", text: "你好" }] })
+    const said = [{ type: "text", text: "你好", cache_control: { type: "ephemeral" } }]
+    expect(q.messages.at(-1)).toEqual({ role: "user", content: said, contents: said })
     machines.push(req.headers.get("cosy-machineid"))
     return sse(
       { choices: [{ delta: { reasoning_content: "想想" } }] },

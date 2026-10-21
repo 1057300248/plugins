@@ -129,6 +129,17 @@ test("Windows finds the Qoder desktop's installed runtime", async () => {
   expect(await _internal.campaignRuntime({ home: sandbox, platform: "win32", arch: "x64", env: { LOCALAPPDATA: sandbox } })).toBe(file)
 })
 
+// accomplish (Discord, 10-21): international check-in failed while CN's
+// needs no device identity at all. A machine-wide Qoder install on Windows
+// keeps the runtime under Program Files, which wasn't searched.
+test("Windows finds a machine-wide Qoder install's runtime", async () => {
+  const file = join(sandbox, "Program Files", "Qoder", "resources", "umid", "runtime-info.exe")
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, "fixture")
+  const env = { LOCALAPPDATA: join(sandbox, "Local"), ProgramFiles: join(sandbox, "Program Files") }
+  expect(await inSandbox(() => _internal.campaignRuntime({ home: join(sandbox, "nobody"), platform: "win32", arch: "x64", env }))).toBe(file)
+})
+
 // Keep desktop discovery inside the fixture, even on a Mac with Qoder installed.
 async function inSandbox(run) {
   const inspect = spyOn(fsPromises, "stat").mockImplementation((path, ...args) => {

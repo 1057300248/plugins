@@ -705,6 +705,16 @@ const textOf = (c) => (typeof c === "string" ? c : blocksOf(c).filter((b) => b.t
 // went out with in order, which is the pairing a dropped id means. Only a
 // result with no call of its turn left to answer becomes text in the user's
 // own turn, so the words the tool returned stay with the conversation.
+// callID is the id a call the client sent without one goes out with: the
+// same on every turn of the conversation (#290), made from where the call
+// is and what it says, so the history Qoder sees doesn't change under a
+// prompt cache from one request to the next.
+function callID(at, k, c) {
+  const args = c.function?.arguments
+  const said = typeof args === "string" ? args : JSON.stringify(args ?? {})
+  return "call_" + createHash("sha256").update(`${at}\0${k}\0${c.function?.name ?? ""}\0${said}`).digest("hex").slice(0, 32)
+}
+
 function qoderMessages(msgs) {
   const out = []
   const names = {}
@@ -757,8 +767,8 @@ function qoderMessages(msgs) {
     if (m.role === "assistant" && m.tool_calls?.length) {
       // a call the client sent without an id gets one, so its result can
       // answer it instead of being turned into text
-      const calls = m.tool_calls.map((c) => {
-        const id = String(c.id ?? "").trim() || "call_" + hexID()
+      const calls = m.tool_calls.map((c, k) => {
+        const id = String(c.id ?? "").trim() || callID(i, k, c)
         names[id] = c.function?.name
         const args = c.function?.arguments
         return { id, type: "function", function: { name: c.function?.name, arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}) } }
@@ -804,6 +814,49 @@ function windowFor(chat, m, reply = 0) {
   return m.windows.find((w) => w >= need) ?? m.windows[m.windows.length - 1]
 }
 
+// UNCACHED are the blocks Qoder's client never marks for the prompt cache.
+const UNCACHED = new Set(["thinking", "redacted_thinking", "tool_use", "tool_result"])
+
+// cacheMarked is the turns as Qoder's own client sends them for the prompt
+// cache (#290): every user turn's blocks also as contents, and the last
+// block of the last turn that isn't thinking or a tool's marked
+// cache_control ephemeral. That is qoder-agent-sdk's (Qoder.app and
+// qodercli 1.1.75 alike): the last message's last such block, and nothing
+// when the last turn is a tool's. A model behind Qoder that caches only
+// what is marked (Anthropic's) read none of a conversation without it,
+// while one that caches on its own (Fast) did. The caller's turns are left
+// as they were.
+function cacheMarked(msgs) {
+  const out = msgs.map((m) => (m.role === "user" && Array.isArray(m.content) ? { ...m, contents: m.content } : m))
+  const last = out.at(-1)
+  if (last?.role !== "user" || !Array.isArray(last.content)) return out
+  const at = last.content.findLastIndex((b) => b?.type && !UNCACHED.has(b.type))
+  if (at < 0) return out
+  const blocks = last.content.slice()
+  blocks[at] = { ...blocks[at], cache_control: { type: "ephemeral" } }
+  out[out.length - 1] = { ...last, content: blocks, contents: blocks }
+  return out
+}
+
+// sessionOf is the session_id a request goes out under: one for every turn
+// of a conversation and another for each conversation, as Qoder's client
+// sends its own session's (#290). Qoder can keep a conversation where its
+// prompt is cached only when its turns say they are one. It is the
+// client's prompt_cache_key (Codex's thread), else its user, else the
+// conversation's opening (its system prompt and first user turn), hashed,
+// so no key of the client's goes to Qoder as it is.
+function sessionOf(chat) {
+  let seed = String(chat.prompt_cache_key ?? "").trim() ? "key\0" + chat.prompt_cache_key : String(chat.user ?? "").trim() ? "user\0" + chat.user : ""
+  if (!seed) {
+    const msgs = chat.messages ?? []
+    const sys = msgs.filter((x) => x.role === "system" || x.role === "developer").map((x) => textOf(x.content))
+    const first = msgs.find((x) => x.role === "user")
+    seed = "chat\0" + JSON.stringify([sys, first?.content ?? ""])
+  }
+  const h = createHash("sha256").update(seed).digest("hex")
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`
+}
+
 // qoderBody is the plaintext agent_chat_generation takes for a chat
 // completion request, for model m.
 function qoderBody(chat, m) {
@@ -817,7 +870,12 @@ function qoderBody(chat, m) {
   if (effort) params.reasoning_effort = effort
   const window = windowFor(chat, m, params.max_tokens)
   if (window > 0) params.context_length = window
+  const request = randomUUID()
   const body = {
+    request_id: request,
+    request_set_id: request,
+    chat_record_id: request,
+    session_id: sessionOf(chat),
     parameters: params,
     business: { product: "app", version: COSY_VERSION, type: "agent", id: hexID(), name: "magpie session", begin_at: Date.now(), stage: "start" },
     agent_id: "agent_common",
@@ -825,7 +883,7 @@ function qoderBody(chat, m) {
     session_type: "app",
     model_config: m.config,
     system: [sys],
-    messages: [{ role: "system", content: [sys] }, ...qoderMessages(chat.messages ?? [])],
+    messages: [{ role: "system", content: [sys] }, ...cacheMarked(qoderMessages(chat.messages ?? []))],
   }
   if (tools.length)
     body.tools = tools.map((t) => ({
@@ -1312,7 +1370,8 @@ const CAMPAIGN_MACHINE_TTL = 60 * 60 * 1000 // Qoder's desktop client renews its
 //
 // Where each one keeps it (Qoder desktop 0.4.3's packages, qodercli 1.1.66):
 //   - desktop: <install>/resources/umid/runtime-info(.exe): Qoder.app on
-//     macOS, %LOCALAPPDATA%\Programs\Qoder (the user installer) on Windows,
+//     macOS, %LOCALAPPDATA%\Programs\Qoder (the user installer) or
+//     %ProgramFiles%\Qoder (a machine-wide install) on Windows,
 //     /opt/Qoder (the .deb and the .rpm) on Linux;
 //   - CLI: <config>/.bin, where <config> is QODER_CONFIG_DIR, else
 //     QODER_CLI_HOME (or the home folder) joined with QODER_CONFIG_DIR_NAME
@@ -1327,6 +1386,8 @@ async function campaignRuntime({ home = homedir(), platform = process.platform, 
   if (platform === "win32") {
     const local = env.LOCALAPPDATA || join(home, "AppData", "Local")
     paths.push(join(local, "Programs", "Qoder", "resources", "umid", name))
+    // the machine-wide installer, as VS Code's system setup places it
+    for (const dir of [env.ProgramFiles || env.PROGRAMFILES, env.ProgramW6432]) if (dir) paths.push(join(dir, "Qoder", "resources", "umid", name))
   } else if (platform === "darwin") {
     for (const dir of ["/Applications", join(home, "Applications")]) paths.push(join(dir, "Qoder.app", "Contents", "Resources", "umid", name))
   } else if (platform === "linux") {
@@ -1993,4 +2054,4 @@ export const QoderAuthPlugin = makePlugin(SITES.qoder)
 export const QoderCNAuthPlugin = makePlugin(SITES["qoder-cn"])
 
 // for tests
-export const _internal = { campaignRuntime, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, SITES, decodeBody, events }
+export const _internal = { campaignRuntime, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, SITES, decodeBody, events }

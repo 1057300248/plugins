@@ -91,6 +91,17 @@ itself.
     answers no call before it. A result with no call left to answer goes
     as text in the user's turn.
   - Your tools become Qoder's native function tools.
+  - A call the client sent without an id gets one made from its turn, its
+    place and its arguments, so it goes out the same on every request.
+- It marks the prompt for Qoder's cache as Qoder's own client does (since
+  0.2.26, #290): the last block of the last user turn carries
+  `cache_control: ephemeral` (nothing is marked when the last turn is a
+  tool's result), user turns carry their blocks as `contents` too, and each
+  request names its conversation in `session_id`. That id is a hash of
+  Codex's thread (`prompt_cache_key`) when magpie sends one, else of the
+  conversation's start, so every turn of one conversation names the same
+  session; the key itself never goes out. Each request has its own
+  `request_id`.
   - The model's own configuration from Qoder's list goes with it.
 - It picks the reasoning effort from the model's own levels:
   - The nearest level to the one asked, the higher one on a tie.
@@ -257,8 +268,8 @@ the account's credentials.
 
 - Install Qoder desktop, or sign in to Qoder CLI once, to make its native
   runtime available. The plugin finds the desktop's `resources/umid`
-  (`Qoder.app` on macOS, `%LOCALAPPDATA%\Programs\Qoder` on Windows,
-  `/opt/Qoder` on Linux) or the runtime the CLI caches in `~/.qoder/.bin`
+  (`Qoder.app` on macOS, `%LOCALAPPDATA%\Programs\Qoder` or, since
+  0.2.26, `%ProgramFiles%\Qoder` on Windows, `/opt/Qoder` on Linux) or the runtime the CLI caches in `~/.qoder/.bin`
   (`runtime-info-<platform>-<arch>-*` on macOS and Linux,
   `umid-win32-x64-*\runtime-info.exe` on Windows; `QODER_CONFIG_DIR`,
   `QODER_CLI_HOME` and `QODER_CONFIG_DIR_NAME` move it as they move the
