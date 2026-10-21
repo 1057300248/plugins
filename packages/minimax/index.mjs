@@ -65,11 +65,37 @@ const num = (v) => {
 
 // ---- the models -------------------------------------------------------------
 
+// The limits the endpoint really allows, for the models whose advertised
+// ones are MiniMax Code's conservative declaration. Its model config says
+// 512K/128K for the M3 family, but the endpoint accepts 1,048,576 input
+// tokens and 524,288 output tokens for every one of them: a request of
+// 1,048,140 input tokens is answered, one of 1,048,700 is refused with
+// "context window exceeds limit (2013)", and max_tokens of 524,288 is
+// accepted where 600,000 is refused with "does not support max tokens >
+// 524288". The advertised numbers are the same for a signed-in account and
+// for nobody, so they are not a plan's limit, and an agent that believes
+// them compacts its history about half way too early.
+const VERIFIED_LIMITS = {
+  "MiniMax-M3.1-Flash": { context: 1048576, output: 524288 },
+  "MiniMax-M3.1-Flash-Preview": { context: 1048576, output: 524288 },
+  "MiniMax-M3": { context: 1048576, output: 524288 },
+}
+
+// limits is a model's context and output: the verified ones where they are
+// known, the advertised ones otherwise.
+function limits(id, context, output) {
+  const v = VERIFIED_LIMITS[id]
+  return {
+    context: v ? v.context : context ?? 0,
+    output: v ? v.output : output ?? 0,
+  }
+}
+
 // MiniMax Code's own list, for when the live one can't be had.
 // thinking: "switchable" (on or off), "forced_on" (always on, at an effort)
 const MODELS = [
-  { id: "MiniMax-M3.1-Flash-Preview", name: "M3.1-Flash-Preview", context: 512000, output: 128000, images: true, thinking: "forced_on", efforts: ["low", "medium", "high", "xhigh", "max"] },
-  { id: "MiniMax-M3", name: "MiniMax-M3", context: 512000, output: 128000, images: true, thinking: "switchable", efforts: [] },
+  { id: "MiniMax-M3.1-Flash-Preview", name: "M3.1-Flash-Preview", context: 1048576, output: 524288, images: true, thinking: "forced_on", efforts: ["low", "medium", "high", "xhigh", "max"] },
+  { id: "MiniMax-M3", name: "MiniMax-M3", context: 1048576, output: 524288, images: true, thinking: "switchable", efforts: [] },
   { id: "MiniMax-M2.7", name: "MiniMax-M2.7", context: 200000, output: 128000, images: false, thinking: "on", efforts: [] },
   { id: "MiniMax-M2.7-highspeed", name: "MiniMax-M2.7-highspeed", context: 200000, output: 128000, images: false, thinking: "on", efforts: [] },
 ]
@@ -94,7 +120,7 @@ function configModels() {
     tool_call: true,
     attachment: !!m.images,
     modalities: { input: m.images ? ["text", "image"] : ["text"], output: ["text"] },
-    limit: { context: m.context, output: m.output },
+    limit: limits(m.id, m.context, m.output),
     cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
     variants: variants(m),
   }]))
@@ -110,7 +136,7 @@ function modelOf(site, provider, m) {
     headers: {},
     options: {},
     cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-    limit: { context: m.context ?? 0, output: m.output ?? 0 },
+    limit: limits(m.id, m.context, m.output),
     capabilities: {
       temperature: true,
       reasoning: reasons(m),

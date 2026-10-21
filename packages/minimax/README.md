@@ -85,12 +85,18 @@ config (`GET /mavis/api/v1/models`). The list includes each model's context,
 image input and thinking options. If the live list doesn't answer, this
 built-in list is used instead:
 
-| Model | Context | Images | Reasoning levels (variants) |
-|---|---|---|---|
-| MiniMax-M3.1-Flash-Preview | 512K | yes | low, medium, high, xhigh, max |
-| MiniMax-M3 | 512K | yes | none, high |
-| MiniMax-M2.7 | 200K | no | — (always thinks) |
-| MiniMax-M2.7-highspeed | 200K | no | — (always thinks) |
+| Model | Context | Output | Images | Reasoning levels (variants) |
+|---|---|---|---|---|
+| MiniMax-M3.1-Flash-Preview | 1M | 512K | yes | low, medium, high, xhigh, max |
+| MiniMax-M3 | 1M | 512K | yes | none, high |
+| MiniMax-M2.7 | 200K | 128K | no | — (always thinks) |
+| MiniMax-M2.7-highspeed | 200K | 128K | no | — (always thinks) |
+
+MiniMax Code's own list reports 512K/128K for the M3 family, but the
+endpoint accepts 1,048,576 input tokens and 524,288 output tokens for
+every one of them, so those are the limits given here. An agent that
+believed the advertised ones would compact its history about half way too
+early.
 
 Variants map to what MiniMax Code sends:
 - a level is adaptive thinking at that effort, which becomes
