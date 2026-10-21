@@ -7,6 +7,8 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs"
+import http from "node:http"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 
@@ -211,6 +213,9 @@ test("prepareChatBody reshapes a chat into what the gateway accepts and meters",
   assert.equal(x.prepareChatBody(null), null)
 })
 
+// The free model's TPM limit, word for word as the gateway sent it in a 200.
+const tpmEvent = 'data:{"text":"[DONE]","error_code":"InferHub.ModelArts.81111.429","error_msg":"The model TPM limit has been significantly exceeded. Please reduce the request rate and retry later."}'
+
 test("classifyHead tells an answer from an embedded error", () => {
   const role = `data: ${JSON.stringify({ choices: [{ delta: { role: "assistant" } }] })}\n\n`
   const content = `data: ${JSON.stringify({ choices: [{ delta: { content: "hi" } }] })}\n\n`
@@ -221,12 +226,22 @@ test("classifyHead tells an answer from an embedded error", () => {
   assert.equal(x.classifyHead(`data: {"error_code":"TM.00001041"`, false), undefined) // not whole yet
   assert.equal(x.classifyHead("", true), "answer")
   assert.equal(x.classifyHead(JSON.stringify({ choices: [{ message: { content: "x" } }] }), true), "answer")
+  // The free model's TPM limit, as the gateway sends it: no space after
+  // `data:`, a code of several parts, and a "[DONE]" that is no end.
+  assert.equal(x.classifyHead(`${tpmEvent}\n\n`, false), "InferHub.ModelArts.81111.429")
+  assert.equal(x.classifyHead(`data: ${JSON.stringify({ text: "[DONE]" })}\n\n`, false), undefined)
+  assert.equal(x.classifyHead(role + "data: [DONE]\n\n", false), "answer")
 })
 
 test("errorCodeOf / errorMessageOf / isRateLimitCode read the gateway's errors", () => {
   const text = '{"error_code":"InferHub.4291.200","error_msg":"insufficient \\"quota\\""}'
   assert.equal(x.errorCodeOf(text), "InferHub.4291.200")
   assert.equal(x.errorMessageOf(text), 'insufficient "quota"')
+  for (const code of ["InferHub.ModelArts.81111.429", "TM.00001041", "APIG.0602", "81114.429", "STS5.1806"]) {
+    assert.equal(x.errorCodeOf(`{"error_code":"${code}"}`), code)
+  }
+  assert.equal(x.errorCodeOf('{"code":"build"}'), "", "a word is no code")
+  assert.equal(x.isRateLimitCode("InferHub.ModelArts.81111.429"), true)
   assert.equal(x.isRateLimitCode("InferHub.4291.200"), true)
   assert.equal(x.isRateLimitCode("81111.429"), true)
   assert.equal(x.isRateLimitCode("InferHub.002002009.404"), false)
@@ -555,7 +570,7 @@ test("fetchRemoteModels merges both endpoints, filters VL, and keeps the publish
 
 test("signedGet returns undefined on a non-2xx response", async () => {
   const fetcher = async () => new Response("nope", { status: 401 })
-  const text = await x.signedGet("https://example.com/x", { access_key_id: "AK", secret_access_key: "SK", security_token: "ST" }, fetcher)
+  const text = await x.signedGet(x.SNAP_MODEL_BUILTIN_URL, { access_key_id: "AK", secret_access_key: "SK", security_token: "ST" }, fetcher)
   assert.equal(text, undefined)
 })
 
@@ -776,6 +791,19 @@ test("an error inside a 200 becomes a status magpie acts on, with the vendor's w
   assert.equal(body.error.message.startsWith("CodeArts"), false, "magpie adds the provider name itself")
 })
 
+test("the free model's TPM limit inside a 200 is a 429 magpie fails over on, not an empty reply", async () => {
+  const cred = await makeCred()
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: async () => sseResponse(`${tpmEvent}\n\n`) })
+  const loaded = await plugin.auth.loader(async () => makeAuth(cred))
+  for (const stream of [true, false]) {
+    const res = await loaded.fetch(CHAT_URL, chatInit({ model: "deepseek-v4.1-flash", messages: [{ role: "user", content: "你好" }], stream }))
+    assert.equal(res.status, 429)
+    const body = await res.json()
+    assert.equal(body.error.code, "InferHub.ModelArts.81111.429")
+    assert.match(body.error.message, /TPM limit/)
+  }
+})
+
 test("embeddedErrorStatus sorts the gateway's codes into what magpie acts on", () => {
   assert.equal(x.embeddedErrorStatus("InferHub.4291.200"), 429)
   assert.equal(x.embeddedErrorStatus("81114.429"), 429)
@@ -950,6 +978,68 @@ test("giving up in the queue takes the request out of it", async () => {
   assert.deepEqual(calls.map((c) => c[0]), ["POST", "DELETE"])
 })
 
+test("a queue poll that hangs can't outlast the wait: the request leaves the queue, a 429", async () => {
+  const cred = await makeCred()
+  const calls = []
+  let deleted
+  const sawDelete = new Promise((r) => { deleted = r })
+  const fetcher = async (url, init) => {
+    calls.push(init.method)
+    if (init.method === "DELETE") {
+      deleted()
+      return new Response("{}", { status: 200 })
+    }
+    if (String(url) === x.TRACE_QUEUE_URL("T3")) {
+      // The poll never answers: only its signal ends it (without one, never),
+      // at once when it ended while the request was signed, as fetch does.
+      // Its open socket is what keeps a real process alive meanwhile: an
+      // AbortSignal.timeout alone doesn't, in node or bun.
+      return new Promise((_, reject) => {
+        if (init.signal?.aborted) return reject(init.signal.reason)
+        const socket = setInterval(() => {}, 1_000)
+        init.signal?.addEventListener("abort", () => {
+          clearInterval(socket)
+          reject(init.signal.reason)
+        })
+      })
+    }
+    return new Response("{}", { status: 429, headers: { "queue-status": "queued", "trace-id": "T3", "retry-after": "0" } })
+  }
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: fetcher, queueBudgetMs: 200 })
+  const loaded = await plugin.auth.loader(async () => makeAuth(cred))
+  const res = await loaded.fetch(CHAT_URL, chatInit({ model: "GLM-5.2", messages: [] }))
+  assert.equal(res.status, 429)
+  await sawDelete
+  assert.equal(calls[0], "POST")
+  assert.equal(calls.at(-1), "DELETE")
+  assert.ok(calls.slice(1, -1).length >= 1 && calls.slice(1, -1).every((m) => m === "GET"))
+})
+
+test("three failed polls take the request out of the queue before the 429", async () => {
+  const cred = await makeCred()
+  const calls = []
+  let deleted
+  const sawDelete = new Promise((r) => { deleted = r })
+  const fetcher = async (url, init) => {
+    calls.push(init.method)
+    if (init.method === "DELETE") {
+      deleted()
+      return new Response("{}", { status: 200 })
+    }
+    if (String(url) === x.TRACE_QUEUE_URL("T4")) return new Response("busy", { status: 503 })
+    return new Response("{}", { status: 429, headers: { "queue-status": "queued", "trace-id": "T4", "retry-after": "0" } })
+  }
+  // A budget the polls can't run out: it is the failures that end the wait.
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: fetcher, queueBudgetMs: 60_000 })
+  const loaded = await plugin.auth.loader(async () => makeAuth(cred))
+  const res = await loaded.fetch(CHAT_URL, chatInit({ model: "GLM-5.2", messages: [] }))
+  assert.equal(res.status, 429)
+  // The DELETE is sent in the background, after it signs: wait for it, with a
+  // bound so a missing one fails here rather than at the runner's timeout.
+  await Promise.race([sawDelete, new Promise((r) => setTimeout(r, 2_000))])
+  assert.deepEqual(calls, ["POST", "GET", "GET", "GET", "DELETE"])
+})
+
 test("a 429 that is no queue passes through for magpie to fail over", async () => {
   const cred = await makeCred()
   const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: async () => new Response('{"error_code":"81111.429"}', { status: 429 }) })
@@ -1086,15 +1176,81 @@ test("a 403 is a sign-in the account no longer has, on chats and other requests 
   assert.equal(calls, 2, "a 403 is not retried")
 })
 
-test("isHuaweiUrl takes only https URLs on Huawei Cloud's own hosts", () => {
-  assert.equal(x.isHuaweiUrl(CHAT_URL), true)
-  assert.equal(x.isHuaweiUrl("https://codearts.huaweicloud.com/x"), true)
-  assert.equal(x.isHuaweiUrl("https://iam.myhuaweicloud.cn/v3"), true)
-  assert.equal(x.isHuaweiUrl("http://snap-access.cn-north-4.myhuaweicloud.com/api"), false, "not over plain http")
-  assert.equal(x.isHuaweiUrl("https://myhuaweicloud.com.example.com/"), false)
-  assert.equal(x.isHuaweiUrl("https://evilmyhuaweicloud.com/"), false)
-  assert.equal(x.isHuaweiUrl("https://example.com/?u=myhuaweicloud.com"), false)
-  assert.equal(x.isHuaweiUrl("not a url"), false)
+test("isSignedHostUrl takes only https URLs on the two hosts the plugin calls, by name", () => {
+  assert.deepEqual([...x.SIGNED_HOSTS].sort(), ["opengw.developer.huaweicloud.com", "snap-access.cn-north-4.myhuaweicloud.com"])
+  assert.equal(x.isSignedHostUrl(CHAT_URL), true)
+  assert.equal(x.isSignedHostUrl(x.BENEFIT_CLAIM_URL), true)
+  assert.equal(x.isSignedHostUrl("https://SNAP-ACCESS.cn-north-4.myhuaweicloud.com/api/v2/chat/completions"), true, "a hostname has no case")
+  // Other Huawei Cloud hosts don't get the account's signature either.
+  for (const other of ["https://codearts.huaweicloud.com/x", "https://iam.myhuaweicloud.cn/v3", "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens", "https://snap-access.cn-south-1.myhuaweicloud.com/api"]) {
+    assert.equal(x.isSignedHostUrl(other), false, other)
+  }
+  assert.equal(x.isSignedHostUrl("http://snap-access.cn-north-4.myhuaweicloud.com/api"), false, "not over plain http")
+  assert.equal(x.isSignedHostUrl("https://snap-access.cn-north-4.myhuaweicloud.com:8443/api"), false, "not on another port")
+  assert.equal(x.isSignedHostUrl("https://snap-access.cn-north-4.myhuaweicloud.com.example.com/"), false)
+  assert.equal(x.isSignedHostUrl("https://example.com/?u=snap-access.cn-north-4.myhuaweicloud.com"), false)
+  assert.equal(x.isSignedHostUrl("not a url"), false)
+})
+
+test("signFor signs only for the two hosts, whichever route asks", async () => {
+  const signed = await x.signFor(signedCred, "GET", x.SNAP_MODEL_BUILTIN_URL, new Uint8Array())
+  assert.match(signed.get("authorization"), /^SDK-HMAC-SHA256 Access=AK,/)
+  assert.equal(signed.get("host"), null, "fetch sets the host")
+  await assert.rejects(x.signFor(signedCred, "GET", "https://example.com/x", new Uint8Array()), /refusing to sign a request to example\.com/)
+  // A route that signs for another host gets nothing out, and never calls.
+  let called = false
+  const never = async () => { called = true; return new Response("{}") }
+  assert.equal(await x.signedGet("https://example.com/x", signedCred, never), undefined)
+  assert.equal((await x.snapRequest("POST", "https://example.com/x", signedCred, never, {})).ok, false)
+  assert.equal(called, false)
+})
+
+test("a 3xx is never followed: whatever the route, the credentials stay on the two hosts", async () => {
+  // Where a redirect would send them, and a stand-in for CodeArts that sends
+  // every request there.
+  const reached = []
+  const elsewhere = http.createServer((req, res) => {
+    reached.push(req.headers)
+    res.end("{}")
+  })
+  await new Promise((r) => elsewhere.listen(0, "127.0.0.1", r))
+  const gateway = http.createServer((req, res) => {
+    res.writeHead(307, { Location: `http://127.0.0.1:${elsewhere.address().port}/stolen` }).end()
+  })
+  await new Promise((r) => gateway.listen(0, "127.0.0.1", r))
+  // The plugin's calls go to the stand-in through the real fetch, with the
+  // init the plugin gave them.
+  const calls = []
+  const fetcher = (url, init) => {
+    calls.push([String(url), init?.redirect])
+    const u = new URL(url)
+    return fetch(`http://127.0.0.1:${gateway.address().port}${u.pathname}${u.search}`, init)
+  }
+  try {
+    const cred = await makeCred()
+    const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: fetcher, ledgerPath: path.join(ledgerDir, "redirect.json") })
+    const loaded = await plugin.auth.loader(async () => makeAuth(cred))
+    // A chat, even one whose caller asks to follow, and a request that isn't one.
+    await assert.rejects(loaded.fetch(CHAT_URL, { ...chatInit({ model: "GLM-5.2", messages: [] }), redirect: "follow" }))
+    await assert.rejects(loaded.fetch(x.SNAP_MODEL_BUILTIN_URL, { method: "GET" }))
+    // The model list, usage, the check-in, the benefit claim, a queue poll, a token request.
+    await plugin.provider.models({ models: {} }, { auth: makeAuth(cred) })
+    await plugin.auth.usage(async () => makeAuth(cred))
+    await plugin.auth.checkin(async () => makeAuth(cred))
+    assert.equal((await x.claimBenefit(cred, fetcher)).ok, false)
+    await assert.rejects(x.traceQueueCall("GET", cred, "T", { sessionId: "s", fetcher }))
+    await assert.rejects(x.refreshCredential(cred, fetcher))
+    assert.equal(reached.length, 0, "nothing reached the host a redirect pointed at")
+    for (const url of [CHAT_URL, x.SNAP_MODEL_BUILTIN_URL, x.OPENGW_GATEWAY_CONFIG_URL, x.SNAP_STATISTICS_URL, x.OPS_DELIVERY_URL, x.BENEFIT_CLAIM_URL, x.TRACE_QUEUE_URL("T"), x.STS_TOKEN_ENDPOINT]) {
+      assert.ok(calls.some(([u]) => u === url), `${url} was called`)
+    }
+    assert.deepEqual(calls.filter(([, redirect]) => redirect !== "error"), [], "every call goes with redirect: error")
+  } finally {
+    for (const s of [gateway, elsewhere]) {
+      s.closeAllConnections?.()
+      await new Promise((r) => s.close(r))
+    }
+  }
 })
 
 test("a request to any other host is refused before the credentials leave", async () => {
@@ -1108,6 +1264,109 @@ test("a request to any other host is refused before the credentials leave", asyn
     assert.match((await res.json()).error.message, /refusing to sign a request to/)
   }
   assert.equal(calls, 0)
+})
+
+const staleBody = '{"error_code":"APIG.0602","error_msg":"the security token has expired"}'
+const spentBody = JSON.stringify({ error_code: "STS5.1806", error_msg: "refresh token has been used" })
+
+test("a renewal that fails only for now keeps the sign-in, and the next request renews again", async () => {
+  const cred = await makeCred()
+  let sts = 0
+  const fetcher = async (url, init) => {
+    if (String(url) === x.STS_TOKEN_ENDPOINT) {
+      sts += 1
+      return sts === 1 ? new Response("upstream unavailable", { status: 503 }) : new Response(stsBody("AK2", "R2"), { status: 200 })
+    }
+    return /Access=AK,/.test(new Headers(init.headers).get("authorization")) ? new Response(staleBody, { status: 401 }) : sseResponse(okStream)
+  }
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: fetcher })
+  const loaded = await plugin.auth.loader(async () => makeAuth(cred))
+  const a = await loaded.fetch(CHAT_URL, chatInit({ model: "GLM-5.2", messages: [] }))
+  assert.equal(a.status, 503)
+  assert.equal(a.headers.get("x-magpie-sign-in"), "kept")
+  const b = await loaded.fetch(CHAT_URL, chatInit({ model: "GLM-5.2", messages: [], stream: true }))
+  assert.equal(b.status, 200)
+  await b.text()
+  assert.equal(sts, 2)
+
+  // A request that isn't a chat: the same.
+  const other = await CodeArtsAuthPlugin({ client: {} }, {
+    fetch: async (url) => (String(url) === x.STS_TOKEN_ENDPOINT ? new Response("", { status: 503 }) : new Response(staleBody, { status: 401 })),
+  })
+  const res = await (await other.auth.loader(async () => makeAuth(cred))).fetch("https://snap-access.cn-north-4.myhuaweicloud.com/v1/model/builtin", { method: "GET" })
+  assert.equal(res.status, 503)
+  assert.equal(res.headers.get("x-magpie-sign-in"), "kept")
+})
+
+test("two loaders of one account and magpie's own renewal spend its refresh token once", async () => {
+  const cred = await makeCred()
+  let sts = 0
+  let release
+  const held = new Promise((r) => { release = r })
+  const fetcher = async (url, init) => {
+    if (String(url) === x.STS_TOKEN_ENDPOINT) {
+      sts += 1
+      await held
+      // STS takes a refresh token once.
+      return sts === 1 ? new Response(stsBody("AK2", "R2"), { status: 200 }) : new Response(spentBody, { status: 400 })
+    }
+    return /Access=AK,/.test(new Headers(init.headers).get("authorization")) ? new Response(staleBody, { status: 401 }) : sseResponse(okStream)
+  }
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: fetcher })
+  // Nothing is stored meanwhile: every read gives the old record.
+  const getAuth = async () => makeAuth(cred)
+  const loaders = await Promise.all([plugin.auth.loader(getAuth), plugin.auth.loader(getAuth)])
+  const answers = Promise.all(loaders.map((l) => l.fetch(CHAT_URL, chatInit({ model: "GLM-5.2", messages: [] }))))
+  const refreshed = plugin.auth.refresh(makeAuth(cred))
+  while (sts < 1) await new Promise((r) => setTimeout(r, 5))
+  await new Promise((r) => setTimeout(r, 20))
+  release()
+  for (const res of await answers) {
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get("x-magpie-sign-in"), null)
+  }
+  assert.equal(JSON.parse((await refreshed).access).access_key_id, "AK2")
+  // One that comes later with the spent token gets what the renewal gave.
+  assert.equal(JSON.parse((await plugin.auth.refresh(makeAuth(cred))).access).access_key_id, "AK2")
+  assert.equal(sts, 1)
+})
+
+test("a refresh token spent a moment ago by someone else: their renewal is taken, the sign-in kept", async () => {
+  const cred = await makeCred()
+  const theirs = { ...cred, access_key_id: "AK3", secret_access_key: "SK3", security_token: "ST3", refresh_token: "R3" }
+  let stored = cred
+  const fetcher = async (url, init) => {
+    if (String(url) === x.STS_TOKEN_ENDPOINT) {
+      stored = theirs // another process won the race and saved its renewal
+      return new Response(spentBody, { status: 400 })
+    }
+    return /Access=AK,/.test(new Headers(init.headers).get("authorization")) ? new Response(staleBody, { status: 401 }) : sseResponse(okStream)
+  }
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: fetcher })
+  const loaded = await plugin.auth.loader(async () => makeAuth(stored))
+  const res = await loaded.fetch(CHAT_URL, chatInit({ model: "GLM-5.2", messages: [], stream: true }))
+  assert.equal(res.status, 200)
+  assert.equal(await res.text(), okStream)
+  const next = await loaded.fetch(CHAT_URL, chatInit({ model: "GLM-5.2", messages: [], stream: true }))
+  assert.equal(next.status, 200, "the account isn't marked")
+  await next.text()
+})
+
+test("a reshaped body goes without the caller's Content-Length", async () => {
+  const cred = await makeCred()
+  const seen = []
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, {
+    fetch: async (url, init) => {
+      seen.push({ length: new Headers(init.headers).get("content-length"), bytes: init.body.length })
+      return sseResponse(okStream)
+    },
+  })
+  const loaded = await plugin.auth.loader(async () => makeAuth(cred))
+  const body = JSON.stringify({ model: "codearts/GLM-5.2", messages: [] })
+  const headers = { "content-type": "application/json", "content-length": String(body.length) }
+  await (await loaded.fetch(CHAT_URL, { method: "POST", headers, body })).text()
+  assert.equal(seen[0].length, null)
+  assert.notEqual(seen[0].bytes, body.length, "the body was reshaped")
 })
 
 test("requestToken reads a spent refresh token as a sign-in gone for good", async () => {
@@ -1381,6 +1640,44 @@ test("a benefit the account can't claim: no free models, and no benefit header",
   assert.deepEqual(sent, [null])
 })
 
+test("benefit not found on a day not yet claimed claims it, and sends the free model again", async () => {
+  const state = {
+    benefit: new Set(["deepseek-v4.1-flash"]), regular: new Set(["deepseek-v4.1-flash"]), noBenefit: new Set(),
+    claim: { day: "2000-01-01", ok: true, at: 0 }, claiming: null,
+  }
+  const sent = []
+  let claims = 0
+  const fetcher = async (url, init) => {
+    if (String(url) === x.BENEFIT_CLAIM_URL) {
+      claims += 1
+      return new Response('{"error_code":"0000"}', { status: 200 })
+    }
+    const benefit = new Headers(init.headers).get("maas_type")
+    sent.push(benefit)
+    // Yesterday's benefit is spent: only today's claim brings it back.
+    return benefit && !claims ? sseResponse(sse({ error_code: "InferHub.4004.200", error_msg: "benefit not found" })) : sseResponse(okStream)
+  }
+  const context = { ...(await x.accountSessionIds(signedCred)), gate: x.createConcurrencyGate(3), state, fetcher }
+  const res = await x.signedFetch(signedCred, CHAT_URL, chatInit({ model: "deepseek-v4.1-flash", messages: [] }), context)
+  assert.equal(res.status, 200)
+  assert.equal((await res.json()).choices[0].message.content, "你好")
+  assert.deepEqual(sent, ["benefit", "benefit"])
+  assert.equal(claims, 1)
+  assert.equal(state.claim.day, x.beijingDay())
+  assert.equal(state.noBenefit.size, 0)
+})
+
+test("a day's claim asks again about the models the last day had no benefit for", async () => {
+  const state = { noBenefit: new Set(["deepseek-v4.1-flash"]), claim: { day: "2000-01-01", ok: true, at: 0 } }
+  const claimed = async () => new Response('{"error_code":"0000"}', { status: 200 })
+  assert.equal(await x.ensureBenefitClaimed(signedCred, claimed, state), true)
+  assert.equal(state.noBenefit.size, 0)
+  // A refused claim leaves them as they were.
+  const refused = { noBenefit: new Set(["deepseek-v4.1-flash"]), claim: null }
+  assert.equal(await x.ensureBenefitClaimed(signedCred, async () => new Response('{"error_code":"4004"}', { status: 200 }), refused), false)
+  assert.equal(refused.noBenefit.size, 1)
+})
+
 test("ensureBenefitClaimed claims once a day and asks again only an hour after a refusal", async () => {
   const cred = await makeCred()
   let claims = 0
@@ -1541,9 +1838,123 @@ test("checkin skips the confirm when the claim answers no id", async () => {
   assert.equal(calls.some((c) => c.url === x.OPS_CONFIRM_URL), false)
 })
 
+test("checkin confirms the claim it left unconfirmed, and tries again later when the confirm fails", async () => {
+  const cred = await makeCred()
+  // The first try: the claim goes through, the confirm doesn't; the answer
+  // says what to keep for the next check-in.
+  const s = { item: daily() }
+  const { unconfirmed, ...first } = await x.dailyCheckin(cred, opsFetcher(s, { confirm: () => new Response("", { status: 502 }) }).fetcher)
+  assert.deepEqual(first, { outcome: "failed", message: "领取确认失败：HTTP 502" })
+  assert.deepEqual(unconfirmed, { campaignId: 1, benefit: { id: 42, benefitAmount: 1000 } })
+  assert.equal(s.item.status, "CLAIMED")
+  // Later that day, told what it left: it is confirmed now, not taken as done.
+  const { fetcher, calls } = opsFetcher(s)
+  const { grant, ...again } = await x.dailyCheckin(cred, fetcher, { unconfirmed })
+  assert.deepEqual(again, { outcome: "claimed", credit: 1000, message: "+1000 积分" })
+  assert.equal(grant.credit, 1000)
+  assert.deepEqual(calls.map((c) => [c.method, c.url]), [["GET", x.OPS_DELIVERY_URL], ["POST", x.OPS_CONFIRM_URL]])
+  assert.deepEqual(calls[1].body, { campaignId: 1 })
+  assert.equal((await x.dailyCheckin(cred, fetcher, { unconfirmed })).outcome, "done")
+  // A claimed activity it didn't leave unconfirmed, or another campaign's, is
+  // done, and nothing is confirmed: the IDE leaves `id: null` claims so.
+  for (const left of [undefined, { campaignId: 9 }]) {
+    const notOurs = opsFetcher({ item: daily({ claimable: false, status: "CLAIMED" }) })
+    assert.equal((await x.dailyCheckin(cred, notOurs.fetcher, { unconfirmed: left })).outcome, "done")
+    assert.deepEqual(notOurs.calls.map((c) => c.url), [x.OPS_DELIVERY_URL])
+  }
+  // A confirm the vendor turns down while the activity is still only claimed
+  // (活动太火爆, a code in a 200, as much as a 503): a failure, tried again later.
+  const busy = () => new Response(JSON.stringify({ code: 500, message: "活动太火爆" }), { status: 200 })
+  for (const confirm of [busy, () => new Response("", { status: 503 })]) {
+    const still = opsFetcher({ item: daily({ claimable: false, status: "CLAIMED" }) }, { confirm })
+    const r = await x.dailyCheckin(cred, still.fetcher, { unconfirmed })
+    assert.equal(r.outcome, "failed")
+    assert.match(r.message, /^领取确认失败：/)
+    assert.deepEqual(still.calls.map((c) => c.method), ["GET", "POST", "GET"], "the activity is looked at again")
+  }
+  // Turned down because it was confirmed meanwhile (the IDE): done.
+  const elsewhere = (st) => {
+    st.item = { ...st.item, status: "CONFIRMED" }
+    return new Response(JSON.stringify({ code: 1002, message: "already confirmed" }), { status: 200 })
+  }
+  const meanwhile = opsFetcher({ item: daily({ claimable: false, status: "CLAIMED" }) }, { confirm: elsewhere })
+  assert.equal((await x.dailyCheckin(cred, meanwhile.fetcher, { unconfirmed })).outcome, "done")
+})
+
+test("a failed confirm is still made by the next check-in when the ledger can't be written", async () => {
+  const cred = await makeCred()
+  // A ledger under a file, not a folder: every write to it fails.
+  const blocker = path.join(ledgerDir, "not-a-folder")
+  fs.writeFileSync(blocker, "")
+  const ledgerPath = path.join(blocker, "ledger.json")
+  let confirms = 0
+  const ops = opsFetcher({ item: daily() }, {
+    confirm: (st) => {
+      confirms += 1
+      if (confirms === 1) return new Response("", { status: 502 })
+      st.item = { ...st.item, status: "CONFIRMED" }
+      return new Response(JSON.stringify({ code: 0, data: null }), { status: 200 })
+    },
+  })
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: ops.fetcher, ledgerPath })
+  assert.equal((await plugin.auth.checkin(async () => makeAuth(cred))).outcome, "failed")
+  assert.equal(fs.existsSync(ledgerPath), false)
+  assert.equal((await plugin.auth.checkin(async () => makeAuth(cred))).outcome, "claimed")
+  assert.equal(confirms, 2)
+  assert.equal((await plugin.auth.checkin(async () => makeAuth(cred))).outcome, "done")
+  assert.equal(confirms, 2)
+})
+
+test("a claim answering no id is never confirmed, however many check-ins follow it", async () => {
+  const cred = await makeCred()
+  const ledgerPath = path.join(ledgerDir, "no-id.json")
+  const ops = opsFetcher({ item: daily() }, {
+    claim: (st) => {
+      st.item = { ...st.item, claimable: false, status: "CLAIMED" } // as the IDE's id-less claim leaves it
+      return new Response(JSON.stringify({ code: 0, data: { id: null, benefitAmount: 1000 } }), { status: 200 })
+    },
+  })
+  const outcomes = []
+  // A second magpie, a restart, OpenCode: each a plugin of its own.
+  for (let i = 0; i < 3; i++) {
+    const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: ops.fetcher, ledgerPath })
+    outcomes.push((await plugin.auth.checkin(async () => makeAuth(cred))).outcome)
+  }
+  assert.deepEqual(outcomes, ["claimed", "done", "done"])
+  assert.equal(ops.calls.filter((c) => c.url === x.OPS_CONFIRM_URL).length, 0, "no confirm the IDE wouldn't send")
+  const [grants] = Object.entries(JSON.parse(fs.readFileSync(ledgerPath, "utf8"))).filter(([k]) => !k.startsWith("_")).map(([, v]) => v)
+  assert.equal(grants.length, 1, "one grant, not one per check-in")
+})
+
+test("a confirm that failed is made by the next check-in, in another magpie too, and then forgotten", async () => {
+  const cred = await makeCred()
+  const ledgerPath = path.join(ledgerDir, "unconfirmed.json")
+  let confirms = 0
+  const ops = opsFetcher({ item: daily() }, {
+    confirm: (st) => {
+      confirms += 1
+      if (confirms === 1) return new Response("", { status: 502 })
+      st.item = { ...st.item, status: "CONFIRMED" }
+      return new Response(JSON.stringify({ code: 0, data: null }), { status: 200 })
+    },
+  })
+  const checkin = async () => {
+    const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: ops.fetcher, ledgerPath })
+    return plugin.auth.checkin(async () => makeAuth(cred))
+  }
+  assert.equal((await checkin()).outcome, "failed")
+  const kept = JSON.parse(fs.readFileSync(ledgerPath, "utf8"))._unconfirmed
+  assert.deepEqual(Object.values(kept).map((v) => [v.campaignId, v.day]), [[1, x.beijingDay()]])
+  assert.deepEqual(await checkin(), { outcome: "claimed", credit: 1000, message: "+1000 积分" })
+  assert.equal(confirms, 2)
+  assert.deepEqual(JSON.parse(fs.readFileSync(ledgerPath, "utf8"))._unconfirmed, {}, "confirmed, so forgotten")
+  assert.equal((await checkin()).outcome, "done")
+  assert.equal(confirms, 2)
+})
+
 test("checkin tells done, inactive and ineligible apart", async () => {
   const cred = await makeCred()
-  for (const status of ["CLAIMED", "CONFIRMED", "CONSUMED"]) {
+  for (const status of ["CONFIRMED", "CONSUMED"]) {
     const { fetcher, calls } = opsFetcher({ item: daily({ claimable: false, status }) })
     assert.equal((await x.dailyCheckin(cred, fetcher)).outcome, "done")
     assert.equal(calls.length, 1)
@@ -1584,11 +1995,46 @@ test("startOAuthFlow serves a callback server and a valid login URL", async () =
   const port = Number(url.searchParams.get("port"))
   assert.ok(port >= 10000, "callback port must be >= 10000")
 
-  // A callback without a code is rejected.
-  const res = await fetch(`http://127.0.0.1:${port}/oauth/callback`)
-  assert.equal(res.status, 400)
+  // A callback without a code fails the flow at once (the browser is sent to
+  // the portal's failure page, not followed there).
+  const res = await fetch(`http://127.0.0.1:${port}/oauth/callback`, { redirect: "manual" })
+  assert.equal(res.status, 307)
+  await assert.rejects(flow.result, /without an authorization code/)
 
   await flow.close()
+})
+
+test("the callback port is one >= 10000, another while the one picked is taken", async () => {
+  const { EventEmitter } = await import("node:events")
+  // A stand-in server: the system gives a port below 10000, and the first
+  // random picks are someone else's.
+  const fakeServer = (taken, code = "EADDRINUSE") => {
+    const tried = []
+    const server = Object.assign(new EventEmitter(), {
+      listen(port, host, cb) {
+        tried.push(port)
+        this.port = port === 0 ? 8080 : port
+        if (port !== 0 && tried.length - 1 <= taken) {
+          queueMicrotask(() => this.emit("error", Object.assign(new Error("listen failed"), { code })))
+          return
+        }
+        queueMicrotask(cb)
+      },
+      address() { return { port: this.port } },
+      close(cb) { queueMicrotask(cb) },
+    })
+    return { server, tried }
+  }
+  const busy = fakeServer(3)
+  const port = await x.listenOnCallbackPort(busy.server)
+  assert.equal(busy.tried[0], 0)
+  assert.equal(busy.tried.length, 5)
+  assert.ok(port >= 10000)
+  assert.equal(port, busy.tried.at(-1))
+  // Anything but a taken port is no reason to try another.
+  const denied = fakeServer(1, "EACCES")
+  await assert.rejects(x.listenOnCallbackPort(denied.server), { code: "EACCES" })
+  assert.equal(denied.tried.length, 2)
 })
 
 /** Run a callback server for one test, its STS answered by `sts`. */
@@ -1600,7 +2046,7 @@ async function withCallbackServer(sts, run) {
     exchanges.push(new URLSearchParams(init.body))
     return sts()
   }
-  const { port, server, result } = await x.startOAuthCallbackServer("ticket", pkce, keyPair, fetcher)
+  const { port, server, result } = await x.startOAuthCallbackServer(pkce, keyPair, fetcher)
   result.catch(() => {})
   const call = (query = "", init = {}) =>
     fetch(`http://127.0.0.1:${port}${x.REDIRECT_PATH}${query}`, { redirect: "manual", ...init })
@@ -1612,18 +2058,58 @@ async function withCallbackServer(sts, run) {
   }
 }
 
-test("the callback server takes only a GET with a code, and never a redirect it is handed", async () => {
-  await withCallbackServer(() => new Response(stsBody("AK", "R"), { status: 200 }), async ({ port, call, exchanges }) => {
+/**
+ * A GET with its path sent as written, over a bare socket: fetch, and bun's
+ * http.request, normalise `/oauth/./callback` before it leaves. Gives the
+ * status and the Location.
+ */
+const rawGet = (port, rawPath) => new Promise((resolve, reject) => {
+  const socket = net.connect(port, "127.0.0.1", () => {
+    socket.write(`GET ${rawPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`)
+  })
+  let answer = ""
+  socket.on("data", (d) => { answer += d })
+  socket.on("end", () => resolve({
+    status: Number(/^HTTP\/1\.1 (\d{3})/.exec(answer)?.[1]),
+    location: /^location: *(.*?)\r?$/im.exec(answer.split("\r\n\r\n")[0])?.[1] ?? null,
+  }))
+  socket.on("error", reject)
+})
+
+test("the callback server takes only a GET to the exact path with a code, and never a redirect it is handed", async () => {
+  await withCallbackServer(() => new Response(stsBody("AK", "R"), { status: 200 }), async ({ port, call, result, exchanges }) => {
     const post = await call("?code=C", { method: "POST" })
     assert.equal(post.status, 405)
     assert.equal(post.headers.get("allow"), "GET")
-    // The old login's parameters are no way in: no code, no exchange, no redirect.
-    const legacy = await call(`?secret=${encodeURIComponent('{"access":"AK"}')}&redirect=${encodeURIComponent("https://evil.example/")}`)
-    assert.equal(legacy.status, 400)
-    assert.equal(legacy.headers.get("location"), null)
-    const elsewhere = await fetch(`http://127.0.0.1:${port}/other?code=C`, { redirect: "manual" })
-    assert.equal(elsewhere.status, 404)
+    // Only the path exactly as sent: none of these is it.
+    const near = ["/other", "/oauth/./callback", "/oauth/%2e/callback", "/oauth/callback/", "/OAUTH/callback", "//oauth/callback"]
+    for (const path of near.map((p) => `${p}?code=C`)) {
+      assert.equal((await rawGet(port, path)).status, 404, path)
+    }
     assert.equal(exchanges.length, 0)
+    // The old login's parameters are no way in: no code is a sign-in that
+    // failed, at once, and the browser goes to the portal's page, not theirs.
+    // (Sent the raw way too, so the 404s above aren't the socket's doing.)
+    const legacyRaw = await rawGet(port, `${x.REDIRECT_PATH}?secret=S&redirect=https%3A%2F%2Fevil.example%2F`)
+    assert.deepEqual(legacyRaw, { status: 307, location: x.buildPortalLoginResultUrl(false) })
+    await assert.rejects(result, /without an authorization code/)
+    // Nothing after that is taken, nor exchanged.
+    const legacy = await call(`?secret=${encodeURIComponent('{"access":"AK"}')}&redirect=${encodeURIComponent("https://evil.example/")}`)
+    assert.equal(legacy.status, 409)
+    assert.equal(legacy.headers.get("location"), null)
+    assert.equal((await call("?code=C")).status, 409)
+    assert.equal(exchanges.length, 0)
+  })
+})
+
+test("a callback the portal sends back with an error ends the sign-in at once, in its words", async () => {
+  await withCallbackServer(() => new Response(stsBody("AK", "R"), { status: 200 }), async ({ call, result }) => {
+    const started = Date.now()
+    const res = await call("?error=access_denied&error_description=user%20cancelled%20the%20sign-in")
+    assert.equal(res.status, 307)
+    assert.equal(res.headers.get("location"), x.buildPortalLoginResultUrl(false))
+    await assert.rejects(result, /CodeArts sign-in failed: user cancelled the sign-in/)
+    assert.ok(Date.now() - started < 5_000, "not left to the 180 s timeout")
   })
 })
 
