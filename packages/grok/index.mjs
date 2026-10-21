@@ -314,14 +314,17 @@ const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v)
 
 // rewrite leaves out what Grok's backend doesn't take: tools of other
 // types (a freeform apply_patch, a namespace of sub-agent tools), a web
-// search's external_web_access, a tool_choice naming a dropped type, and a
+// search's external_web_access, a tool_choice naming a dropped type or
+// with no tools beside it (magpie sends "none" so when a client turned
+// tools off, yetone/magpie#3110; Grok refuses it: "A tool_choice was set on
+// the request but no tools were specified"), and a
 // reasoning item's "content": null, beside which it can't read the
 // encrypted reasoning. A function's parameters with a union at the root
 // (Codex desktop's codex_app automation_update) are folded to an object,
 // which Grok turns away otherwise: "tool parameter root must be an object
 // type" (magpie#1271).
 function rewrite(body) {
-  if (typeof body !== "string" || (!body.includes('"tools"') && !body.includes('"reasoning"') && !body.includes('"agent_message"'))) return body
+  if (typeof body !== "string" || (!body.includes('"tools"') && !body.includes('"tool_choice"') && !body.includes('"reasoning"') && !body.includes('"agent_message"'))) return body
   let m
   try {
     m = JSON.parse(body)
@@ -355,6 +358,10 @@ function rewrite(body) {
       delete m.tool_choice
       dirty = true
     }
+  }
+  if (Object.hasOwn(m, "tool_choice") && !(Array.isArray(m.tools) && m.tools.length)) {
+    delete m.tool_choice
+    dirty = true
   }
   if (Array.isArray(m.input)) {
     m.input = m.input.map((it) => {

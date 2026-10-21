@@ -87,6 +87,8 @@ leaves these out:
 - tools of types it doesn't take (a freeform `apply_patch`, namespaces)
 - `external_web_access` on web search
 - a `tool_choice` naming a dropped type
+- a `tool_choice` with no tools beside it (magpie sends `"none"` so when a
+  client turned tools off)
 - a reasoning item's `"content": null`
 
 Plain Codex collaboration items (`agent_message`) reach Grok as user
