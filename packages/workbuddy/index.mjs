@@ -1699,11 +1699,15 @@ function makePlugin(site) {
 
 // REFUSED_HINT is what the user can do about WorkBuddy's "Illegal API
 // invocation from an unapproved channel": both builds answer it to a chat
-// holding words of Codex's or Claude Code's own (magpie #182), whatever the
-// headers. FLAGGED rewrites the ones known; this is for one it doesn't know. It ends the error's message, as magpie's built-in
-// put it (provider.WBRefusedHint), so magpie's routing page says it apart.
+// holding words they turn away, whatever the headers. Codex's and Claude
+// Code's were the first (magpie #182), DeepSeek Harness's and Claude
+// Desktop's came later (#279, #170), and WorkBuddy reads every message, so
+// it names no client. FLAGGED rewrites the words known; this is for ones it
+// doesn't know. It ends the error's message word for word as magpie's
+// Routing page has it (WB_REFUSED in its routing client.js), which says it
+// apart from WorkBuddy's own words.
 const REFUSED_HINT =
-  "WorkBuddy refuses chats from Codex and Claude Code (their system prompt); use it from Hermes, OpenCode or Pi, or add another provider to this group"
+  "WorkBuddy refused words in this client's prompt (most often its system prompt); use it from Hermes, OpenCode or Pi, or add another provider to this group"
 const REFUSED = /unapproved channel|illegal api invocation/i
 
 // RESTRICTED_HINT is what the user can do about WorkBuddy's 403 code 11140
