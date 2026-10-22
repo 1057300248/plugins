@@ -1563,10 +1563,16 @@ function anthropicBody(body) {
       continue
     }
     // Attribution is consumed here; Factory does not strip Anthropic's
-    // billing block and requires the Droid identity to be first.
-    if (block?.type === "text" && block.text?.startsWith("x-anthropic-billing-header: cc_version=")) {
+    // billing block and requires the Droid identity to be first. Only the
+    // header's own line goes: a block (or string system) that carries
+    // instructions after it, such as Claude Code's auto-mode classifier
+    // policy, keeps them and its other fields (#302).
+    if (block?.type === "text" && block.text.startsWith("x-anthropic-billing-header: cc_version=")) {
       changed = true
-      continue
+      const end = block.text.indexOf("\n")
+      const rest = end < 0 ? "" : block.text.slice(end + 1)
+      if (rest.trim() === "") continue
+      block.text = rest
     }
     if (block?.type === "text") {
       // The gateway may join the identity and instructions into one block.
