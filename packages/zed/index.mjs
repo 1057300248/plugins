@@ -552,6 +552,68 @@ function wireOf(url) {
 
 const WIRE_VENDOR = { anthropic: "anthropic", responses: "open_ai", chat: "x_ai", gemini: "google" }
 
+// Claude Code (2.1.288 on) puts {role: "system"} messages inside an
+// Anthropic request's messages: a turn's effort as output_config on an empty
+// one, and its hooks' notices and what the user typed while a tool ran after
+// the tool results (2.1.296). Anthropic's own API takes them where they sit;
+// Zed's cloud takes only user and assistant there and answers 400 "failed
+// to parse Anthropic request: unknown variant `system`, expected `user` or
+// `assistant`". withoutSystemTurns keeps each one's text where it was, as
+// text blocks of a user turn: appended to the user message before it, else
+// put after the tool results at the head of the user message after it, else
+// a user message of its own. One with no text (an effort alone) is left out;
+// the request's own output_config still asks for the turn's effort. Kept in
+// place, not moved to the top-level system: system comes before every
+// message in the prompt cache's prefix, so text added there each turn would
+// miss the cache for the whole conversation, and the notice would lose
+// where in the turn it was said.
+function systemBlocks(content) {
+  if (typeof content === "string") return content ? [{ type: "text", text: content }] : []
+  if (!Array.isArray(content)) return []
+  return content.filter((b) => b && typeof b === "object" && !(b.type === "text" && !b.text))
+}
+
+function asBlocks(content) {
+  if (Array.isArray(content)) return content
+  if (typeof content === "string" && content) return [{ type: "text", text: content }]
+  return []
+}
+
+function withoutSystemTurns(messages) {
+  if (!messages.some((m) => m?.role === "system")) return messages
+  const out = []
+  let pending = [] // system text waiting for the user message after it
+  for (const m of messages) {
+    if (m?.role === "system") {
+      const blocks = systemBlocks(m.content)
+      if (!blocks.length) continue
+      const prev = out.at(-1)
+      if (prev?.role === "user" && !pending.length) prev.content = [...asBlocks(prev.content), ...blocks]
+      else pending.push(...blocks)
+      continue
+    }
+    if (pending.length) {
+      if (m?.role === "user") {
+        const c = asBlocks(m.content)
+        let i = 0
+        while (i < c.length && c[i]?.type === "tool_result") i++
+        out.push({ ...m, content: [...c.slice(0, i), ...pending, ...c.slice(i)] })
+        pending = []
+        continue
+      }
+      out.push({ role: "user", content: pending })
+      pending = []
+    }
+    out.push(m)
+  }
+  if (pending.length) {
+    const prev = out.at(-1)
+    if (prev?.role === "user") prev.content = [...asBlocks(prev.content), ...pending]
+    else out.push({ role: "user", content: pending })
+  }
+  return out
+}
+
 // providerRequest is the request as Zed takes it for its provider's API,
 // and whether the caller asked for a stream (Zed always streams).
 function providerRequest(wire, req, model) {
@@ -567,6 +629,7 @@ function providerRequest(wire, req, model) {
           if (b?.type === "tool_result" && !("is_error" in b)) b.is_error = false
         }
       }
+      if (Array.isArray(req.messages)) req.messages = withoutSystemTurns(req.messages)
       return { req, stream }
     }
     case "responses": {
