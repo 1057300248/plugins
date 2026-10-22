@@ -75,7 +75,7 @@ magpie plugin logout cloudflare-workers-ai                           # サイン
 
 ## 有料専用モデル
 
-Workers Paid または AI Gateway クレジットが必要な 8 モデルは名前に半角括号の **(Paid)** を付けます：
+Workers Paid または AI Gateway クレジットが必要な 8 モデルは名前に **(Paid)** を付けます：
 
 `@cf/moonshotai/kimi-k2.6`、
 `@cf/moonshotai/kimi-k2.7-code`、`@cf/zai-org/glm-5.2`、`@cf/zai-org/glm-5.3`、

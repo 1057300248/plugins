@@ -80,7 +80,7 @@ then `opencode auth login` → Cloudflare Workers AI (same two fields).
 ## Paid-only models
 
 Eight models are gated by Cloudflare behind Workers Paid or prepaid AI Gateway
-credits and are flagged ** (Paid)** in the name — that is exactly how the
+credits and are flagged **(Paid)** in the name — that is exactly how the
 model picker renders it:
 
 `@cf/moonshotai/kimi-k2.6`,
