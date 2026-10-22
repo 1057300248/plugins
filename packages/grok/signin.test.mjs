@@ -2,11 +2,14 @@
 // (internal/provider/grok.go, grokSigned): Grok's 401 goes on as it came,
 // and says X-Magpie-Sign-In: kept, as the built-in never marked a Grok
 // account lapsed.
+import { noRealGrok } from "./nocli.mjs"
 import { afterAll, afterEach, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { GrokAuthPlugin } from "./index.mjs"
+
+noRealGrok()
 
 const real = globalThis.fetch
 afterEach(() => (globalThis.fetch = real))

@@ -1,8 +1,11 @@
 // grok-4.7 offers the built-in's reasoning levels before Grok lists any:
 // magpie keeps the configured model when the models hook fails, and a
 // model with no variants lost the levels the built-in had (low…xhigh).
+import { noRealGrok } from "./nocli.mjs"
 import { expect, test } from "bun:test"
 import { GrokAuthPlugin, _internal } from "./index.mjs"
+
+noRealGrok()
 
 test("the configured grok-4.7 carries the built-in's levels", async () => {
   const hooks = await GrokAuthPlugin({ client: { auth: { set: async () => {} } } })

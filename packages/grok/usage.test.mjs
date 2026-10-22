@@ -1,11 +1,14 @@
 // auth.usage tells what magpie's built-in Grok account shows
 // (internal/provider/grok_usage.go), against the CLI backend's replies as
 // its tests give them (grok_usage_test.go).
+import { noRealGrok } from "./nocli.mjs"
 import { afterAll, afterEach, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { GrokAuthPlugin, _internal } from "./index.mjs"
+
+noRealGrok()
 
 const real = globalThis.fetch
 afterEach(() => (globalThis.fetch = real))

@@ -15,11 +15,14 @@
 // token as it was (the CLI saying "Renewed" with pre_key == post_key), fail
 // exits 1 as a failed silent refresh. PATH is emptied so no real grok is
 // ever found, and fetch is a stand-in: nothing reaches the network.
+import { noRealGrok } from "./nocli.mjs"
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { GrokAuthPlugin } from "./index.mjs"
+
+noRealGrok()
 
 const real = globalThis.fetch
 const env = { ...process.env }
