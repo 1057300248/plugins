@@ -285,8 +285,28 @@ the account's credentials.
   international account gets no daily claim until Qoder is installed.
 - A helper that is there but can't be read, or gives an invalid identity,
   is `failed` and asked again later, rather than a false "no activity"
-  result. Qoder CN keeps its existing requests and does not need this
-  local helper.
+  result.
+
+Qoder CN (since 0.2.30) sends its own device identity the same way when
+Qoder CN is installed: its desktop 0.4.9 and CLI (`qoderclicn`) both ask
+Qoder CN's `runtime-info` for environment `0` (the international one is
+`3`) and send it on the campaigns pages (yetone/magpie#2911, #304).
+
+- The plugin finds Qoder CN desktop's `resources/umid` (`Qoder CN.app` on
+  macOS, `%LOCALAPPDATA%\Programs\Qoder CN` or `%ProgramFiles%\Qoder CN`
+  on Windows, `/opt/Qoder-CN` on Linux) or the runtime its CLI caches in
+  `~/.qoder-cn/.bin` (`QODERCN_CONFIG_DIR`, `QODERCN_CLI_HOME` and
+  `QODERCN_CONFIG_DIR_NAME` move it). `QODERCN_RUNTIME_INFO` names
+  another location; `QODER_RUNTIME_INFO` is only the international one's.
+- Without it the requests go out as before, as Qoder CN's desktop does
+  when it can't read the identity, and a claim the list still offers is
+  made. When the list then offers no daily claim, the check-in is
+  `ineligible` for the day with a message to install Qoder CN desktop (or
+  sign in to its CLI); a helper that is there but can't be read makes it
+  `failed`, asked again later.
+- Not tried with a real Qoder CN account: whether Qoder CN now hides the
+  daily claim from a request without the identity, as the international
+  site does, is inferred from its clients, not seen.
 
 - **List:** `GET <openapi>/sash/api/v1/me/campaigns`: `campaigns[]` with
   `campaignId`, `actionType`, `claimStatus` (`CLAIMABLE`, `CLAIMED`),

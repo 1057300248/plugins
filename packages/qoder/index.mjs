@@ -1526,23 +1526,45 @@ const CAMPAIGN_MACHINE_TTL = 60 * 60 * 1000 // Qoder's desktop client renews its
 //     (or .qoder): a file runtime-info-<platform>-<arch>-<hash> on macOS and
 //     Linux, a folder umid-win32-<arch>-<hash> holding runtime-info.exe on
 //     Windows.
-async function campaignRuntime({ home = homedir(), platform = process.platform, arch = process.arch, env = process.env, opt = "/opt" } = {}) {
-  if (env.QODER_RUNTIME_INFO) return resolve(env.QODER_RUNTIME_INFO)
+//
+// Qoder CN keeps its own (Qoder CN desktop 0.4.9's packages, qoderclicn
+// 1.1.77): Qoder CN.app on macOS (its installer's expectedBundleName),
+// /opt/Qoder-CN on Linux (the .deb), Qoder CN on Windows (the user
+// installer's "Uninstall Qoder CN.exe", electron-builder's
+// Programs\<productName>); its CLI's config is QODERCN_CONFIG_DIR, else
+// QODERCN_CLI_HOME (or home) joined with QODERCN_CONFIG_DIR_NAME (or
+// .qoder-cn). Both ask the helper for environment 0, the international
+// ones for 3 (the desktop's `regionCode === "global" ? 3 : 0`, the CLI's
+// UMID environment ONLINE = 0, US_ONLINE = 3).
+//
+// required: international Qoder lists the daily credits only on a request
+// carrying the identity. Qoder CN's desktop sends it when it can read it
+// and goes on without it when it can't, and a Qoder CN account was offered
+// and claimed the credits without one (0.2.21), so there it is sent when
+// Qoder CN is installed and left out when it isn't.
+const RUNTIMES = {
+  qoder: { name: "Qoder", environment: "3", override: "QODER_RUNTIME_INFO", app: "Qoder", linux: "Qoder", cli: "QODER_", dir: ".qoder", required: true },
+  "qoder-cn": { name: "Qoder CN", environment: "0", override: "QODERCN_RUNTIME_INFO", app: "Qoder CN", linux: "Qoder-CN", cli: "QODERCN_", dir: ".qoder-cn", required: false },
+}
+
+async function campaignRuntime({ home = homedir(), platform = process.platform, arch = process.arch, env = process.env, opt = "/opt", runtime = RUNTIMES.qoder } = {}) {
+  if (env[runtime.override]) return resolve(env[runtime.override])
   const name = platform === "win32" ? "runtime-info.exe" : "runtime-info"
   const isFile = async (path) => (await stat(path).catch(() => null))?.isFile() ?? false
   const paths = []
   if (platform === "win32") {
     const local = env.LOCALAPPDATA || join(home, "AppData", "Local")
-    paths.push(join(local, "Programs", "Qoder", "resources", "umid", name))
+    paths.push(join(local, "Programs", runtime.app, "resources", "umid", name))
     // the machine-wide installer, as VS Code's system setup places it
-    for (const dir of [env.ProgramFiles || env.PROGRAMFILES, env.ProgramW6432]) if (dir) paths.push(join(dir, "Qoder", "resources", "umid", name))
+    for (const dir of [env.ProgramFiles || env.PROGRAMFILES, env.ProgramW6432]) if (dir) paths.push(join(dir, runtime.app, "resources", "umid", name))
   } else if (platform === "darwin") {
-    for (const dir of ["/Applications", join(home, "Applications")]) paths.push(join(dir, "Qoder.app", "Contents", "Resources", "umid", name))
+    for (const dir of ["/Applications", join(home, "Applications")]) paths.push(join(dir, runtime.app + ".app", "Contents", "Resources", "umid", name))
   } else if (platform === "linux") {
-    paths.push(join(opt, "Qoder", "resources", "umid", name))
+    paths.push(join(opt, runtime.linux, "resources", "umid", name))
   }
   for (const path of paths) if (await isFile(path)) return path
-  const config = env.QODER_CONFIG_DIR || join(env.QODER_CLI_HOME || env.GEMINI_CLI_HOME || home, env.QODER_CONFIG_DIR_NAME || ".qoder")
+  const cli = (key) => env[runtime.cli + key]
+  const config = cli("CONFIG_DIR") || join(cli("CLI_HOME") || env.GEMINI_CLI_HOME || home, cli("CONFIG_DIR_NAME") || runtime.dir)
   const cache = join(config, ".bin")
   const entries = await readdir(cache, { withFileTypes: true }).catch(() => [])
   const found = []
@@ -1556,7 +1578,7 @@ async function campaignRuntime({ home = homedir(), platform = process.platform, 
     if (path && (await isFile(path))) found.push({ path, time: (await stat(path)).mtimeMs })
   }
   if (found.length) return found.sort((a, b) => b.time - a.time)[0].path
-  throw new RuntimeMissing()
+  throw new RuntimeMissing(runtime)
 }
 
 // RuntimeMissing: no Qoder desktop or CLI on this machine to read the
@@ -1566,19 +1588,21 @@ async function campaignRuntime({ home = homedir(), platform = process.platform, 
 // never makes up. Asking again won't change that until the user installs
 // Qoder, so the check-in says what to do once instead of "tries again later".
 class RuntimeMissing extends Error {
-  constructor() {
+  constructor(runtime = RUNTIMES.qoder) {
+    const { name, override } = runtime
     super(
-      "Qoder check-in: device identity runtime not found. Qoder gives the daily credits only to a device its own app identifies, and this machine has neither Qoder desktop nor Qoder CLI to read that identity from. Install Qoder desktop (or install Qoder CLI and sign in to it once), or set QODER_RUNTIME_INFO to its runtime-info executable; magpie checks in again the next day",
+      `${name} check-in: device identity runtime not found. ${name} gives the daily credits only to a device its own app identifies, and this machine has neither ${name} desktop nor ${name} CLI to read that identity from. Install ${name} desktop (or install ${name} CLI and sign in to it once), or set ${override} to its runtime-info executable; magpie checks in again the next day`,
     )
   }
 }
 
-// Read the SDK identity as Qoder does: environment 3 is international; on
-// Windows and macOS the uid goes over stdin, never into the command line.
-async function campaignMachine(uid) {
+// Read the SDK identity as Qoder does: environment 3 is international, 0
+// Qoder CN; on Windows and macOS the uid goes over stdin, never into the
+// command line.
+async function campaignMachine(uid, runtime = RUNTIMES.qoder) {
   if (!uid) throw new Error("Qoder check-in: device identity needs the account uid; sign in again")
-  const file = await campaignRuntime()
-  const args = process.platform === "linux" ? ["3"] : ["3", "--account-stdin"]
+  const file = await campaignRuntime({ runtime })
+  const args = process.platform === "linux" ? [runtime.environment] : [runtime.environment, "--account-stdin"]
   const text = await new Promise((resolve, reject) => {
     const child = execFile(file, args, { timeout: 20_000, windowsHide: true, maxBuffer: 1 << 20 }, (err, out) => {
       if (err) reject(err)
@@ -1587,7 +1611,7 @@ async function campaignMachine(uid) {
     child.stdin?.on("error", () => {})
     child.stdin?.end(process.platform === "linux" ? undefined : JSON.stringify({ account: uid }) + "\n")
   }).catch(() => {
-    throw new Error("Qoder check-in: could not read device identity; restart or update Qoder, or check QODER_RUNTIME_INFO")
+    throw new Error(`${runtime.name} check-in: could not read device identity; restart or update ${runtime.name}, or check ${runtime.override}`)
   })
   try {
     const identity = JSON.parse(text.trim().split(/\r?\n/, 1)[0])
@@ -1599,7 +1623,7 @@ async function campaignMachine(uid) {
     }
     return headers
   } catch {
-    throw new Error("Qoder check-in: invalid device identity from Qoder; restart or update Qoder")
+    throw new Error(`${runtime.name} check-in: invalid device identity from ${runtime.name}; restart or update ${runtime.name}`)
   }
 }
 
@@ -1754,12 +1778,13 @@ const makePlugin = (site) => async ({ client }) => {
   const ID = site.id
   // The SDK identity is account-specific. Share an in-flight read, refresh
   // after an hour, and leave a failed read available for the next attempt.
+  const runtime = RUNTIMES[ID]
   const campaignMachines = new Map()
   const machineForCampaign = async (uid) => {
     const now = Date.now()
     let entry = campaignMachines.get(uid)
     if (!entry || now - entry.at >= CAMPAIGN_MACHINE_TTL) {
-      entry = { at: now, promise: campaignMachine(uid) }
+      entry = { at: now, promise: campaignMachine(uid, runtime) }
       campaignMachines.set(uid, entry)
     }
     try {
@@ -1767,6 +1792,16 @@ const makePlugin = (site) => async ({ client }) => {
     } catch (e) {
       if (campaignMachines.get(uid) === entry) campaignMachines.delete(uid)
       throw e
+    }
+  }
+  // campaignIdentity: the headers a campaigns request carries, and why
+  // there are none where the site goes on without them (Qoder CN).
+  const campaignIdentity = async (uid) => {
+    if (runtime.required) return { machine: await machineForCampaign(uid) }
+    try {
+      return { machine: await machineForCampaign(uid) }
+    } catch (e) {
+      return { machine: {}, unread: e }
     }
   }
   // serializes checking, rotating and saving tokens: a refresh token is
@@ -1927,7 +1962,7 @@ const makePlugin = (site) => async ({ client }) => {
     if (!url) return errorResponse({ status: 404, message: "only chat completions are served" })
     const method = String(init.method ?? input?.method ?? "GET").toUpperCase()
     try {
-      const machine = site.id === "qoder" ? await machineForCampaign(cred.uid) : {}
+      const { machine } = await campaignIdentity(cred.uid)
       // A PAT account has no device token: its job token signs the campaigns
       // pages too, as it does the usage read. Nothing is rotated on that
       // path — the refusal is the answer.
@@ -1956,7 +1991,7 @@ const makePlugin = (site) => async ({ client }) => {
     const base = campaignTarget(site, siteOf(site, cred), site.openapi + CAMPAIGNS)
     if (!base) return { outcome: "inactive", message: "no campaigns page for this account" }
     try {
-      const machine = site.id === "qoder" ? await machineForCampaign(cred.uid) : {}
+      const { machine, unread } = await campaignIdentity(cred.uid)
       // A PAT account has no device token: the campaigns pages take the job
       // token the exchange gave, as the usage endpoint does. A live Qoder CN
       // PAT account answered 200 to the list and CLAIMED to a claim, so the
@@ -1994,7 +2029,13 @@ const makePlugin = (site) => async ({ client }) => {
           const amount = Number(done.benefit?.amount)
           return { outcome: "done", ...(Number.isFinite(amount) && amount > 0 ? { credit: amount } : {}) }
         }
-        return campaigns.length ? { outcome: "failed", message: "campaigns: today's credits aren't offered yet" } : { outcome: "inactive" }
+        if (campaigns.length) return { outcome: "failed", message: "campaigns: today's credits aren't offered yet" }
+        // Asked without Qoder CN's identity and offered nothing: what an
+        // international list says to a request without one, so say why
+        // (no Qoder CN on this machine) or ask again (it didn't answer).
+        if (unread instanceof RuntimeMissing) return { outcome: "ineligible", message: unread.message }
+        if (unread) return { outcome: "failed", message: unread.message }
+        return { outcome: "inactive" }
       }
       const claimRes = await call(base.replace(/\/$/, "") + "/" + encodeURIComponent(campaign.campaignId) + "/claim", "POST", "{}")
       let claim = {}
@@ -2233,4 +2274,4 @@ export const QoderAuthPlugin = makePlugin(SITES.qoder)
 export const QoderCNAuthPlugin = makePlugin(SITES["qoder-cn"])
 
 // for tests
-export const _internal = { campaignRuntime, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, SITES, decodeBody, events, QUEUE, queueState }
+export const _internal = { campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, SITES, decodeBody, events, QUEUE, queueState }
