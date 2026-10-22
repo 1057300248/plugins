@@ -1408,7 +1408,21 @@ async function campaignRuntime({ home = homedir(), platform = process.platform, 
     if (path && (await isFile(path))) found.push({ path, time: (await stat(path)).mtimeMs })
   }
   if (found.length) return found.sort((a, b) => b.time - a.time)[0].path
-  throw new Error("Qoder check-in: device identity runtime not found; install Qoder desktop or sign in to Qoder CLI once, or set QODER_RUNTIME_INFO to its runtime-info executable")
+  throw new RuntimeMissing()
+}
+
+// RuntimeMissing: no Qoder desktop or CLI on this machine to read the
+// device identity from. Qoder offers the daily credits only on a request
+// carrying it (without it the list answers 200 with no CLAIM_BENEFIT), and
+// the identity is the output of Qoder's own signed helper, which the plugin
+// never makes up. Asking again won't change that until the user installs
+// Qoder, so the check-in says what to do once instead of "tries again later".
+class RuntimeMissing extends Error {
+  constructor() {
+    super(
+      "Qoder check-in: device identity runtime not found. Qoder gives the daily credits only to a device its own app identifies, and this machine has neither Qoder desktop nor Qoder CLI to read that identity from. Install Qoder desktop (or install Qoder CLI and sign in to it once), or set QODER_RUNTIME_INFO to its runtime-info executable; magpie checks in again the next day",
+    )
+  }
 }
 
 // Read the SDK identity as Qoder does: environment 3 is international; on
@@ -1851,6 +1865,9 @@ const makePlugin = (site) => async ({ client }) => {
       }
       return { outcome: "failed", message: `claim: ${said || "unknown answer"}` }
     } catch (e) {
+      // no Qoder on this machine: an answer for the day, not a failure
+      // magpie would ask again every 30 minutes (plugins#304)
+      if (e instanceof RuntimeMissing) return { outcome: "ineligible", message: e.message }
       return { outcome: "failed", message: e?.message ?? String(e), ...(e?.expired ? { signIn: "expired" } : {}) }
     }
   }

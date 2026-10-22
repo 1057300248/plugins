@@ -277,9 +277,16 @@ the account's credentials.
 - For another installation location, set `QODER_RUNTIME_INFO` to the
   absolute path of Qoder's installed `runtime-info` executable
   (`runtime-info.exe` on Windows), with its accompanying SDK files.
-- A missing helper or invalid identity is an error, rather than a false
-  "no activity" result. Qoder CN keeps its existing requests and does
-  not need this local helper.
+- With no helper anywhere (a machine that never had Qoder desktop or
+  Qoder CLI), the check-in is `ineligible` for the day, with a message
+  saying to install one (or set `QODER_RUNTIME_INFO`); magpie asks again
+  the next day rather than every 30 minutes (#304). The identity comes
+  only from Qoder's own helper: the plugin never makes one up, so such an
+  international account gets no daily claim until Qoder is installed.
+- A helper that is there but can't be read, or gives an invalid identity,
+  is `failed` and asked again later, rather than a false "no activity"
+  result. Qoder CN keeps its existing requests and does not need this
+  local helper.
 
 - **List:** `GET <openapi>/sash/api/v1/me/campaigns`: `campaigns[]` with
   `campaignId`, `actionType`, `claimStatus` (`CLAIMABLE`, `CLAIMED`),

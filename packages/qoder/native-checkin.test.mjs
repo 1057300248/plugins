@@ -96,6 +96,32 @@ test("CN claims without the native runtime", async () => {
   expect(reads).toHaveLength(0)
 })
 
+// plugins#304: on a machine that never had Qoder there is no helper to read
+// the identity from, and without it Qoder hides the daily credits. That is
+// an answer for the day with what to do once, not "tries again later".
+test("no Qoder on this machine is ineligible, saying how to get its identity, and asks nothing", async () => {
+  delete process.env.QODER_RUNTIME_INFO
+  const nowhere = spyOn(fsPromises, "stat").mockImplementation(() => Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" })))
+  try {
+    const p = await checkin(QoderAuthPlugin, () => json(LIST))
+    expect(p.out.outcome).toBe("ineligible")
+    expect(p.out.message).toContain("Install Qoder desktop")
+    expect(p.out.message).toContain("QODER_RUNTIME_INFO")
+    expect(p.seen).toHaveLength(0)
+    expect(reads).toHaveLength(0)
+  } finally {
+    nowhere.mockRestore()
+  }
+})
+
+test("a helper that is there but can't be read is failed, to be asked again", async () => {
+  nativeError = new Error("fixture helper unavailable")
+  const p = await checkin(QoderAuthPlugin, () => json(LIST))
+  expect(p.out.outcome).toBe("failed")
+  expect(p.out.message).toContain("could not read device identity")
+  expect(p.seen).toHaveLength(0)
+})
+
 test("an unreadable list reply is failed", async () => {
   const p = await checkin(QoderAuthPlugin, () => new Response("<html>"))
   expect(p.out).toMatchObject({ outcome: "failed" })
