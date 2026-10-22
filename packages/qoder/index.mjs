@@ -956,7 +956,7 @@ function failure(status, text) {
     const model = queue?.modelKey ? ` for ${queue.modelKey}` : ""
     const tier = queue?.queueType ? ` (this plan's queue: ${queue.queueType})` : ""
     const what = queue?.isQueued === true ? "queued the request" : "is busy"
-    return { status: 503, message: `Qoder ${what}${model}${tier}; try again in ${wait}s`, retryAfter: wait, signIn: "" }
+    return { status: 503, message: `Qoder ${what}${model}${tier}; try again in ${wait}s`, retryAfter: wait, signIn: "", queue: queue ?? {} }
   }
   if (QUOTA_CODES.has(code)) return { status: 429, message: "usage limit reached: " + msg, signIn: "" }
   if (REQUEST_CODES.has(code)) return { status: 400, message: `Qoder refused the request (${code}): ${msg}`, signIn: "" }
@@ -986,6 +986,148 @@ const errorResponse = ({ status, message, signIn = status === 401 ? "kept" : und
       ...(retryAfter > 0 ? { "Retry-After": String(retryAfter) } : {}),
     },
   })
+
+// ---- Qoder's queue -------------------------------------------------------------
+
+// A chat Qoder answers with its queue code (10605) is waited out as Qoder's
+// own client waits it (qoder-agent-sdk's worker in Qoder.app 0.4.3, its
+// "[ModelQueue]" path): it asks GET /api/v2/service/ask/queue/status with
+// the request's requestSetId, the model and the plan's queueType, at once
+// and then every retryAfterSeconds (held to 0.5s..30s, 30s when unsaid),
+// while the state says isQueued or serviceAvailable false. Once isQueued is
+// false it waits that state's retryAfterSeconds, if any, and sends the same
+// request again, request_set_id and all, up to 10 times. Three failed asks
+// in a row, a 404 (no queue there) or a state with neither field end the
+// wait. Qoder's client waits up to an hour; here the whole of it is held
+// under QUEUE.budget from the request's start, since nothing reaches the
+// agent meanwhile: magpie keeps a stream's agent alive with comments for 5
+// minutes of a vendor's silence, and then leaves it to the agent's own
+// timeout. Past the budget it is the 503 with Retry-After it was before, so
+// magpie may ask another account. Qoder's client also tells
+// /api/v2/service/ask/finish when its turn ends; that is left out, and its
+// own log says Qoder's TTL releases the lease when finish is not heard.
+const QUEUE_STATUS_PATH = "/algo/api/v2/service/ask/queue/status"
+const QUEUE = {
+  budget: 4 * 60 * 1000, // the longest a request is held, its first answer's wait included
+  shortest: 500,
+  longest: 30_000,
+  unsaid: 30_000, // a pause when the queue gives no retryAfterSeconds
+  recoveries: 10, // the queue waited out this many times, at most, for one request
+  failures: 3, // status asks failing in a row that end the wait
+  ask: 30_000, // the longest one status ask may take
+  now: () => Date.now(),
+  pause: (ms, signal) =>
+    new Promise((ok, no) => {
+      if (signal?.aborted) return no(signal.reason ?? new DOMException("aborted", "AbortError"))
+      const t = setTimeout(() => {
+        signal?.removeEventListener("abort", stop)
+        ok()
+      }, ms)
+      const stop = () => {
+        clearTimeout(t)
+        no(signal.reason ?? new DOMException("aborted", "AbortError"))
+      }
+      signal?.addEventListener("abort", stop, { once: true })
+    }),
+}
+
+// queuePause is how long to wait before asking the queue again: the
+// queue's retryAfterSeconds held to 0.5s..30s, or 30s when it said none.
+function queuePause(seconds) {
+  const n = Number(seconds)
+  const ms = Number.isFinite(n) ? n * 1000 : QUEUE.unsaid
+  return Math.min(QUEUE.longest, Math.max(QUEUE.shortest, ms))
+}
+
+class QueueEnd extends Error {}
+
+// queueState is the queue's state in a status reply, found as Qoder's
+// client finds it: the object, or one under data/result/message/body, as
+// an object or a JSON string, that says isQueued or serviceAvailable.
+function queueState(text) {
+  let root
+  try {
+    root = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  const todo = [root]
+  const seen = new Set()
+  while (todo.length) {
+    const o = todo.shift()
+    if (!o || typeof o !== "object" || Array.isArray(o) || seen.has(o)) continue
+    seen.add(o)
+    const flag = (v) => (typeof v === "boolean" ? v : v === "true" ? true : v === "false" ? false : undefined)
+    const isQueued = flag(o.isQueued)
+    const serviceAvailable = flag(o.serviceAvailable)
+    if (isQueued !== undefined || serviceAvailable !== undefined) {
+      const num = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? undefined : Number(v))
+      const str = (v) => (typeof v === "string" && v ? v : undefined)
+      return { isQueued, serviceAvailable, modelKey: str(o.modelKey), queueType: str(o.queueType), retryAfterSeconds: num(o.retryAfterSeconds) }
+    }
+    for (const k of ["data", "result", "message", "body"]) {
+      const v = o[k]
+      if (v && typeof v === "object") todo.push(v)
+      else if (typeof v === "string")
+        try {
+          todo.push(JSON.parse(v))
+        } catch {}
+    }
+  }
+  return undefined
+}
+
+// queueStatus asks Qoder's queue where the request stands.
+async function queueStatus(api, cred, { requestSetId, modelKey, queueType, requestId, sessionId }, signal, deadline) {
+  const q = new URLSearchParams({ requestSetId, modelKey })
+  if (queueType) q.set("queueType", queueType)
+  const url = `${api}${QUEUE_STATUS_PATH}?${q}`
+  const headers = { ...cosyHeaders(url, cred, ""), "X-Request-ID": requestId, "X-Session-ID": sessionId }
+  delete headers["Content-Type"]
+  const left = Math.min(QUEUE.ask, deadline - QUEUE.now())
+  if (left <= 0) throw new QueueEnd("the queue's wait ran out")
+  const res = await fetch(url, { headers, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(left)]) : AbortSignal.timeout(left) })
+  const text = await res.text()
+  if (res.status === 404) throw new QueueEnd("Qoder has no queue status here")
+  if (!res.ok) throw new Error(`queue status: HTTP ${res.status}`)
+  const st = queueState(text)
+  if (!st) throw new QueueEnd("the queue status said nothing of the queue")
+  return st
+}
+
+// queueWait waits in Qoder's queue for the request, from the state its
+// refusal gave, until the queue lets it through (true) or the wait ends
+// (false). A cancelled request throws.
+async function queueWait(api, cred, ask, first, signal, deadline) {
+  let q = first ?? {}
+  let asked = false
+  let failed = 0
+  for (;;) {
+    if (signal?.aborted) throw signal.reason ?? new DOMException("aborted", "AbortError")
+    if (QUEUE.now() >= deadline) return false
+    if (asked) await QUEUE.pause(Math.min(queuePause(q.retryAfterSeconds), Math.max(0, deadline - QUEUE.now())), signal)
+    asked = true
+    if (QUEUE.now() >= deadline) return false
+    let st
+    try {
+      st = await queueStatus(api, cred, { ...ask, modelKey: q.modelKey ?? ask.modelKey, queueType: q.queueType ?? ask.queueType }, signal, deadline)
+    } catch (e) {
+      if (signal?.aborted) throw signal.reason ?? e
+      if (e instanceof QueueEnd) return false
+      if (++failed >= QUEUE.failures) return false
+      q = { ...q, retryAfterSeconds: undefined }
+      continue
+    }
+    failed = 0
+    q = { ...st, modelKey: st.modelKey ?? q.modelKey, queueType: st.queueType ?? q.queueType }
+    if (st.isQueued === false) {
+      if (st.retryAfterSeconds > 0) await QUEUE.pause(Math.min(queuePause(st.retryAfterSeconds), Math.max(0, deadline - QUEUE.now())), signal)
+      return QUEUE.now() < deadline
+    }
+    if (st.serviceAvailable === false || st.isQueued === true) continue
+    return false
+  }
+}
 
 // ---- the reply ----------------------------------------------------------------
 
@@ -1232,11 +1374,17 @@ async function* events(body) {
 // answer turns Qoder's reply into the chat completion OpenAI's API gives.
 // A failure before the answer keeps its status; one after it ends the
 // stream with an error.
-async function answer(res, chat) {
+// opened is a chat reply's events and the first of them, read before
+// anything is answered: a refusal in the stream (Qoder's queue among them)
+// comes first.
+async function opened(res) {
+  const it = events(res.body)
+  return { it, first: await it.next() }
+}
+
+async function answer({ it, first }, chat) {
   const id = "chatcmpl-" + hexID()
   const created = Math.floor(Date.now() / 1000)
-  const it = events(res.body)
-  const first = await it.next()
   if (first.value?.error) return errorResponse(first.value.error)
   if (first.done) return errorResponse({ status: 502, message: "Qoder ended without an answer" })
 
@@ -1889,23 +2037,37 @@ const makePlugin = (site) => async ({ client }) => {
       return errorResponse({ status: 502, message: e?.message ?? String(e) })
     }
     if (!m) return errorResponse({ status: 400, message: `unknown or disabled model "${chat.model}"` })
-    const CHAT_URL = siteOf(site, cred).api + CHAT_PATH
-    const wire = encodeBody(JSON.stringify(qoderBody(chat, m)))
-    const headers = {
-      ...cosyHeaders(CHAT_URL, cred, wire),
-      Accept: "text/event-stream",
-      "Cache-Control": "no-cache",
-      "X-Model-Key": m.key,
-      "X-Model-Source": m.source,
+    const api = siteOf(site, cred).api
+    const CHAT_URL = api + CHAT_PATH
+    const body = qoderBody(chat, m)
+    const wire = encodeBody(JSON.stringify(body))
+    // Qoder's queue is waited out (queueWait) and the same request, its
+    // request_set_id the one the queue knows, sent again
+    const deadline = QUEUE.now() + QUEUE.budget
+    const ask = { requestSetId: body.request_set_id, requestId: body.request_id, sessionId: body.session_id, modelKey: m.key }
+    for (let waited = 0; ; waited++) {
+      const headers = {
+        ...cosyHeaders(CHAT_URL, cred, wire),
+        Accept: "text/event-stream",
+        "Cache-Control": "no-cache",
+        "X-Model-Key": m.key,
+        "X-Model-Source": m.source,
+      }
+      let res, open
+      try {
+        res = await fetch(CHAT_URL, { method: "POST", headers, body: wire, signal: init.signal })
+        if (res.ok) open = await opened(res)
+      } catch (e) {
+        return errorResponse({ status: 502, message: e.message })
+      }
+      const f = !res.ok ? failure(res.status, (await res.text()).slice(0, 1 << 20)) : open.first.value?.error
+      if (!f?.queue || waited >= QUEUE.recoveries) return f && !res.ok ? errorResponse(f) : answer(open, chat)
+      try {
+        if (!(await queueWait(api, cred, ask, f.queue, init.signal, deadline))) return errorResponse(f)
+      } catch (e) {
+        return errorResponse({ status: 502, message: e?.message ?? String(e) })
+      }
     }
-    let res
-    try {
-      res = await fetch(CHAT_URL, { method: "POST", headers, body: wire, signal: init.signal })
-    } catch (e) {
-      return errorResponse({ status: 502, message: e.message })
-    }
-    if (!res.ok) return errorResponse(failure(res.status, (await res.text()).slice(0, 1 << 20)))
-    return answer(res, chat)
   }
 
   return {
@@ -2071,4 +2233,4 @@ export const QoderAuthPlugin = makePlugin(SITES.qoder)
 export const QoderCNAuthPlugin = makePlugin(SITES["qoder-cn"])
 
 // for tests
-export const _internal = { campaignRuntime, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, SITES, decodeBody, events }
+export const _internal = { campaignRuntime, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, SITES, decodeBody, events, QUEUE, queueState }

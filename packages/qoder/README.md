@@ -139,7 +139,7 @@ itself.
 |---|---|
 | A refused sign-in (no code, or code 105) | 401 |
 | A quota (codes 110, 112–119, 122) | 429 |
-| Busy or queued for the model (code 10605) | 503, with `Retry-After` from Qoder's `retryAfterSeconds` (30s when it gives none); the sign-in is untouched |
+| Busy or queued for the model (code 10605) | Since 0.2.28 the request waits in Qoder's queue as Qoder's client does (below), then is sent again; past the wait, 503 with `Retry-After` from Qoder's `retryAfterSeconds` (30s when it gives none). The sign-in is untouched |
 | A refusal of the request itself (codes 406, 416, 430, 80411, 80412, 100400–100403) | 400, with Qoder's words |
 | "Error in upstream response", the model's own vendor behind Qoder failing, which Qoder sends as a 400 (since 0.2.24) | 502, so magpie asks again or another account; the sign-in is untouched |
 | A failure before the answer starts | Qoder's status |
@@ -318,6 +318,20 @@ by a BOM or wrapped in an outer message is read as busy too; see
 That parser fix does not remove the provider's limit or prove that every
 live 401 had the same cause. A timeout likewise does not establish an
 empty wallet or an expired login.
+
+Since **0.2.28** a queued request waits its turn as Qoder's own client
+(Qoder.app 0.4.3's agent worker) waits it: it asks
+`/api/v2/service/ask/queue/status` with the request's `requestSetId`, the
+model and the plan's `queueType`, at once and then every
+`retryAfterSeconds` (held to 0.5–30s, 30s when unsaid), and once
+`isQueued` is false it waits that state's `retryAfterSeconds` and sends the
+same request again (up to 10 times). Qoder's client waits up to an hour;
+the plugin waits at most 4 minutes from the request's start, since nothing
+reaches the agent meanwhile (magpie keeps a stream alive with comments for
+5 minutes of silence). Three failed status asks in a row, a 404, or a
+cancelled request end the wait early. Qoder's client also reports the end
+of its turn to `/api/v2/service/ask/finish`; the plugin doesn't, and
+Qoder releases that lease on its own TTL. `queue.test.mjs` has the wait.
 
 For a bounded offline reproduction, run `packages/qoder/busy.test.mjs`
 from #185 in an isolated temporary HOME. It compares plain queue JSON,
