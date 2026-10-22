@@ -50,6 +50,12 @@ const SIGN_IN_TIMEOUT = 10 * 60 * 1000
 const BUILDER_ID_START = "https://view.awsapps.com/start"
 const BUILDER_ID_PROFILE = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX"
 const isBuilderID = (provider) => String(provider ?? "").toLowerCase() === "builderid"
+// uidOf is what tells two Kiro accounts of one email apart: the way it was
+// signed in to. Kiro keeps a Google and a GitHub sign-in of one email (or
+// Builder ID's, or Identity Center's) as different accounts, and magpie
+// keeps a sign-in of an email already signed in as that account unless
+// both have a uid and the two differ (#309). "" when it isn't known.
+const uidOf = (loginProvider) => String(loginProvider ?? "").trim().toLowerCase()
 
 const env = (k) => process.env[k] ?? ""
 const home = () => env("HOME") || homedir()
@@ -438,11 +444,15 @@ function account(client) {
     lock = run.catch(() => {})
     return run
   }
+  // an account signed in here before its uid was kept is given it, so a
+  // sign-in with another way to the same email no longer replaces it
+  const uidSaved = new Set()
+  const uidField = (auth) => (!auth?.uid && uidOf(auth?.loginProvider) ? { uid: uidOf(auth.loginProvider) } : {})
   const save = async (auth, c) => {
     if (!c.own || !client?.auth?.set) return
     const { type: _t, ...rest } = auth
     await client.auth.set({ path: { id: ID }, body: { ...rest, type: "oauth", access: c.access, refresh: c.refresh, expires: c.expires,
-      profileArn: c.profile, region: c.region } }).catch(() => {})
+      profileArn: c.profile, region: c.region, ...uidField(auth) } }).catch(() => {})
   }
   const creds = (auth, stale = false) =>
     locked(async () => {
@@ -460,6 +470,7 @@ function account(client) {
       }
       read = newest(read)
       let c = held?.id === id ? held.c : null
+      let saved = false
       if (!c || read.access !== c.access || !fresh(c) || stale) {
         if (!read.profile && c && read.access === c.access) read.profile = c.profile
         if (stale && c && read.access !== c.access && fresh(read)) stale = false // the owner refreshed it already
@@ -468,11 +479,20 @@ function account(client) {
           if (c.method === "apikey") throw gone("Kiro turned down the API key saved on the provider")
           c = renewed(c, await refresh(c))
           await save(auth, c)
+          saved = true
         }
       }
       if (!c.profile) {
         c.profile = await profileOf(c)
-        if (!auth?.profileArn) await save(auth, c)
+        if (!auth?.profileArn && !saved) {
+          await save(auth, c)
+          saved = true
+        }
+      }
+      // once per token: a save that didn't take isn't tried on every request
+      if (!saved && c.own && uidField(auth).uid && !uidSaved.has(c.access)) {
+        uidSaved.add(c.access)
+        await save(auth, c)
       }
       held = { id, c }
       return { token: c.access, tokenType: tokenType(c), profile: c.profile, region: regionOf(c.profile, c.region) }
@@ -493,7 +513,7 @@ function account(client) {
       const out = { access: c.access, expires: c.expires }
       if (c.refresh !== auth.refresh) out.refresh = c.refresh
       if (c.profile && c.profile !== auth.profileArn) out.profileArn = c.profile
-      return out
+      return { ...out, ...uidField(auth) }
     })
   return creds
 }
@@ -1405,6 +1425,7 @@ async function browserSignIn() {
     const who = await whoIs(c)
     const user = who.email || "Kiro account"
     finish({ type: "success", provider: ID, refresh: c.refresh, access: c.access, expires: c.expires, accountId: user,
+      ...(uidOf(c.loginProvider) ? { uid: uidOf(c.loginProvider) } : {}),
       method: c.method, loginProvider: c.loginProvider, region: c.region, profileArn: who.profile,
       ...(c.clientId ? { clientId: c.clientId, clientSecret: c.clientSecret } : {}), ...(who.plan ? { plan: who.plan } : {}) })
     html(200, page(true, "You're signed in", `${user} is signed in. You can close this tab.`))

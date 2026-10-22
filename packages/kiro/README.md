@@ -19,6 +19,12 @@ Power) and makes its requests, in OpenCode and in magpie. Provider id:
     the browser to AWS, and trades the code AWS returns.
   - The account is named by the email Kiro has for it (`Get-Usage-Limits`),
     and its plan is read from the same call.
+  - Kiro keeps a Google, a GitHub, a Builder ID and an Identity Center
+    sign-in of one email as different accounts. The sign-in carries a `uid`
+    (`google`, `github`, `builderid`, `enterprise`), so magpie keeps each one
+    beside the others, and a sign-in again the same way replaces only its
+    own account. An account signed in before 0.1.13 is given its `uid` on
+    its first request, model listing, usage read or renewal.
   - A company's own identity provider (`external_idp`) is not supported
     here. Sign in with `kiro-cli login` and use the next method instead.
 - **Kiro CLI's or Kiro IDE's sign-in**: uses the account kiro-cli is signed
