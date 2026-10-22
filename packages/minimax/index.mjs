@@ -365,7 +365,12 @@ function signed(site, path, { access, userID, body, origin = site.agent, query, 
   return { url: url.toString(), init: { method: json === undefined ? "GET" : "POST", headers, ...(json === undefined ? {} : { body: json }) } }
 }
 
-class AccountRefused extends Error {}
+class AccountRefused extends Error {
+  constructor(message, status) {
+    super(message)
+    this.status = status
+  }
+}
 
 // checked throws on an answer MiniMax's account API says failed in its body.
 function checked(env, what) {
@@ -382,7 +387,7 @@ function checked(env, what) {
 async function accountCall(site, path, opts, what) {
   const { url, init } = signed(site, path, opts)
   const res = await fetch(url, { ...init, signal: AbortSignal.timeout(15000) })
-  if (res.status === 401 || res.status === 403) throw new AccountRefused(`${what}: the sign-in was refused (HTTP ${res.status})`)
+  if (res.status === 401 || res.status === 403) throw new AccountRefused(`${what}: the sign-in was refused (HTTP ${res.status})`, res.status)
   if (!res.ok) throw new Error(`${what}: HTTP ${res.status}`)
   let env
   try {
@@ -535,12 +540,19 @@ function usageOf(m, windows = []) {
 // gateway, 0.6.12): as the account, user_id its realUserID — MiniMax Code
 // won't ask without one, and every minimax-cloud call it makes names the
 // user — and the desktop's device_platform web, is_desktop 1 and its
-// version. The international site turns away a check-in asked as user 0
-// with a 401 while the same token chats (Magic_zero on Discord).
+// version. Its host is the account API's (agent.minimaxi.com on the China
+// site, agent.minimax.io on the international one), not the chat host:
+// MiniMax Code's minimax-cloud origin table has these.
+//
+// A 401 there ({"error":"invalid access token"}) is answered as MiniMax
+// Code answers it: the sign-in renewed (a newer token if one is had, else
+// refreshed), the user id read again for that token, and the check-in
+// asked once more. The chat path does the same on its 401, which is why a
+// token minimax-cloud turned away still chatted (Magic_zero on Discord).
 const CHECKIN_QUERY = { device_platform: "web", is_desktop: "1", desktop_version: "0.6.12" }
 
 async function checkinCall(site, access, userID, path, body) {
-  const opts = { access, userID, origin: site.llm, query: CHECKIN_QUERY }
+  const opts = { access, userID, origin: site.agent, query: CHECKIN_QUERY }
   if (body !== undefined) opts.body = body
   return accountCall(site, path, opts, "check-in")
 }
@@ -832,10 +844,22 @@ function makePlugin(site) {
           } catch (e) {
             return { outcome: "failed", message: e?.message ?? String(e), ...(e?.signIn ? { signIn: e.signIn } : {}) }
           }
+          const failed = (e) => ({ outcome: "failed", message: e?.message ?? String(e), ...(e?.signIn ? { signIn: e.signIn } : {}) })
           try {
             return await checkinOf(site, a.access, a.realUserID)
           } catch (e) {
-            return { outcome: "failed", message: e?.message ?? String(e), ...(e?.signIn ? { signIn: e.signIn } : {}) }
+            if (!(e instanceof AccountRefused && e.status === 401)) return failed(e)
+            // MiniMax Code's /checkin on a 401: renewed, and asked once more
+            try {
+              ;({ a } = await fresh(getAuth, a.access))
+            } catch (e2) {
+              return e2 instanceof SignInExpired ? failed(e2) : failed(e)
+            }
+            try {
+              return await checkinOf(site, a.access, undefined)
+            } catch (e2) {
+              return failed(e2)
+            }
           }
         },
         methods: [

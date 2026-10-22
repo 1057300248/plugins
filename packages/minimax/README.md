@@ -120,7 +120,10 @@ the plugin reads the panel (`/minimax-cloud/api/v1/signin/status`) and
 claims the day's credits (`/minimax-cloud/api/v1/signin/claim`) with the
 same signed account API, asked as MiniMax Code's own `/checkin` asks them:
 as the account (its MiniMax user id, looked up first when the sign-in
-didn't keep it), from the desktop client. magpie can run it once a day per account, when its
+didn't keep it), from the desktop client, on MiniMax Code's own hosts
+(agent.minimax.io, agent.minimaxi.com). A check-in turned away with 401 is
+renewed and asked once more, with the user id read again, as MiniMax Code
+does. magpie can run it once a day per account, when its
 MiniMax check-in switch is on; Settings → Usage → Plugins has that switch
 and a *Check in now* button, and the outcome — claimed, done, inactive,
 ineligible, with the streak — lands on the account's Usage card.
