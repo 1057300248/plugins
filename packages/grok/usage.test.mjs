@@ -67,10 +67,22 @@ test("no current period: the billing period's Allowance; an unknown one has no s
   expect(u).toEqual({ signIn: "kept", windows: [{ name: "Allowance", used: 0 }] })
 })
 
-test("a refused token is the status magpie says; no sign-in says to sign in", async () => {
-  expect((await run(auth, () => new Response("", { status: 401 }))).u).toEqual({ signIn: "kept", error: "Unauthorized", windows: [] })
+test("a refused token with no Grok Build to renew it says so; no sign-in says to sign in", async () => {
+  const [path, bin] = [process.env.PATH, process.env.GROK_BIN_DIR]
+  process.env.PATH = ""
+  process.env.GROK_BIN_DIR = join(home, "none")
+  try {
+    const { u } = await run(auth, () => new Response("", { status: 401 }))
+    expect(u).toMatchObject({ signIn: "kept", windows: [] })
+    expect(u.error).toContain("there is no Grok Build here to renew it")
+  } finally {
+    process.env.PATH = path
+    if (bin === undefined) delete process.env.GROK_BIN_DIR
+    else process.env.GROK_BIN_DIR = bin
+  }
   const { u, seen } = await run({ ...auth, refresh: join(home, "none") }, () => Response.json({}))
-  expect(u).toEqual({ signIn: "kept", error: "Grok is not signed in; run `grok login`", windows: [] })
+  // a home of the plugin's: `grok login` signs in ~/.grok, not there
+  expect(u).toEqual({ signIn: "kept", error: "Grok is not signed in for this account any more; add the account in magpie again", windows: [] })
   expect(seen).toEqual([])
 })
 

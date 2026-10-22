@@ -29,12 +29,25 @@ async function chat(reply) {
   return { res, sent }
 }
 
+// With no Grok Build to renew the token Grok turned away, the 401 says so
+// beside what Grok said (renew.test.mjs has the CLI renewing it).
 test("Grok's 401 is passed on once, the account kept", async () => {
-  const { res, sent } = await chat(() => Response.json({ error: "token revoked" }, { status: 401 }))
-  expect(sent).toBe(1)
-  expect(res.status).toBe(401)
-  expect(res.headers.get("X-Magpie-Sign-In")).toBe("kept")
-  expect(await res.json()).toEqual({ error: "token revoked" })
+  const [path, bin] = [process.env.PATH, process.env.GROK_BIN_DIR]
+  process.env.PATH = ""
+  process.env.GROK_BIN_DIR = join(home, "none")
+  try {
+    const { res, sent } = await chat(() => Response.json({ error: "token revoked" }, { status: 401 }))
+    expect(sent).toBe(1)
+    expect(res.status).toBe(401)
+    expect(res.headers.get("X-Magpie-Sign-In")).toBe("kept")
+    const msg = (await res.json()).error.message
+    expect(msg).toContain("there is no Grok Build here to renew it")
+    expect(msg).toContain('Grok said: {"error":"token revoked"}')
+  } finally {
+    process.env.PATH = path
+    if (bin === undefined) delete process.env.GROK_BIN_DIR
+    else process.env.GROK_BIN_DIR = bin
+  }
 })
 
 // nor cleared one: an answer that went through leaves the mark as it is
