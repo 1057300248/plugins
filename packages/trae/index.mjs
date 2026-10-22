@@ -1332,7 +1332,8 @@ class TextTools {
       const r = this.buf.search(REASON_AT)
       const sm = this.buf.match(STRAY_AT)
       const s = sm ? sm.index : -1
-      if (s >= 0 && [i, d, r].every((x) => x < 0 || s < x)) {
+      const x = this.buf.search(XML_AT)
+      if (s >= 0 && [i, d, r, x].every((y) => y < 0 || s < y)) {
         // a close with no call open, with what GLM left before it
         // (}}</tool_call>, magpie#1945): not the answer, dropped; in code,
         // shown
@@ -1351,7 +1352,7 @@ class TextTools {
         this.after = true
         continue
       }
-      if (r >= 0 && (i < 0 || r < i) && (d < 0 || r < d)) {
+      if (r >= 0 && (i < 0 || r < i) && (d < 0 || r < d) && (x < 0 || r < x)) {
         const o = objectEnd(this.buf, r)
         if (o === -1 && !end) {
           // not whole yet: held, the text before it sent
@@ -1371,7 +1372,39 @@ class TextTools {
         this.buf = this.buf.slice(r + 1)
         continue
       }
-      if (i < 0 && d < 0) break
+      if (i < 0 && d < 0 && x < 0) break
+      if (x >= 0 && (i < 0 || x < i) && (d < 0 || x < d)) {
+        // Anthropic's <function_calls><invoke name="…"> or Qwen's
+        // <function=…>, as Kimi and MiMo write a call (01huadalang on
+        // magpie's Discord, dsh): a call only for a tool the request
+        // declared, and never in a code fence or backticks
+        const head = this.buf.slice(0, x)
+        const at = this.buf.slice(x)
+        const opener = at.match(/^<[^<>]*>?/)[0]
+        if (quoted(this.sent + text + head)) {
+          text += head + opener
+          this.buf = at.slice(opener.length)
+          continue
+        }
+        const b = this.xmlCall(at, end)
+        if (b.wait) break
+        if (b.text) {
+          text += head + opener
+          this.buf = at.slice(opener.length)
+          continue
+        }
+        text += head
+        if (b.error) {
+          this.buf = ""
+          this.sent += text
+          return { text, calls, reasoning, error: b.error }
+        }
+        calls.push(b.call)
+        this.mark = this.sent.length + text.length
+        this.buf = b.rest
+        this.after = true
+        continue
+      }
       if (d >= 0 && (i < 0 || d < i)) {
         text += this.buf.slice(0, d)
         this.buf = this.buf.slice(d)
@@ -1462,7 +1495,7 @@ class TextTools {
       this.buf = ""
     } else {
       // keep back an opened block, or what may be the start of one
-      const at = [this.buf.search(OPEN_AT), this.buf.search(OPEN_HOLD), this.buf.search(DSML_AT), this.buf.search(REASON_AT)].filter((x) => x >= 0)
+      const at = [this.buf.search(OPEN_AT), this.buf.search(OPEN_HOLD), this.buf.search(DSML_AT), this.buf.search(REASON_AT), this.buf.search(XML_AT), this.buf.search(XML_HOLD)].filter((x) => x >= 0)
       let keep = at.length ? this.buf.length - Math.min(...at) : 0
       if (!keep) for (let k = Math.min(MARK_MAX - 1, this.buf.length); k > 0; k--) if (MARKS.some((m) => m.startsWith(this.buf.slice(-k)))) { keep = k; break }
       // and braces, brackets, quotes or a > a close may still come after
@@ -1473,6 +1506,60 @@ class TextTools {
     }
     this.sent += text
     return { text, calls, reasoning }
+  }
+
+  // xmlCall reads a call written in Anthropic's tags (<function_calls>
+  // around one or more <invoke name="…"><parameter name="k">v</parameter>
+  // </invoke>) or Qwen's (<function=…><parameter=k>v</parameter>
+  // </function>), s starting at its first tag: {call, rest}, {wait}
+  // while it may still become one, {text} when it is no call (a tool the
+  // request didn't declare, a tag named in prose), {error} for one cut
+  // short. Each invoke is a call of its own; the tags between them are
+  // dropped as the leftovers of one.
+  xmlCall(s, end) {
+    const w = s.match(/^<(?:antml:)?function_calls>/)
+    if (w) {
+      const rest = s.slice(w[0].length).replace(/^\s+/, "")
+      if (!end && (!rest || XML_STARTS.some((k) => k.startsWith(rest)))) return { wait: true }
+      return this.xmlInvoke(rest, end)
+    }
+    return this.xmlInvoke(s, end)
+  }
+
+  xmlInvoke(s, end) {
+    let m = s.match(/^<(?:antml:)?invoke\s+name\s*=\s*"([^"<>]+)"\s*>/)
+    let closeRe = /<\/(?:antml:)?invoke\s*>/
+    if (!m) {
+      m = s.match(/^<function=([^\s<>]+?)\s*>/)
+      closeRe = /<\/function\s*>/
+    }
+    if (!m) {
+      // an opener still being written
+      if (!end && (XML_STARTS.some((k) => k.startsWith(s)) || /^<(?:antml:)?(?:invoke\s|function=)[^<>]{0,300}$/.test(s))) return { wait: true }
+      return { text: true }
+    }
+    const declared = this.tools.map((t) => (t.function ?? t)?.name).filter(Boolean)
+    const name = toolNamed(m[1].trim(), this.tools)
+    if (!declared.includes(name)) return { text: true }
+    const body = s.slice(m[0].length)
+    const c = body.match(closeRe)
+    const n = body.search(XML_NEXT)
+    let stop = c ? c.index : -1
+    if (n >= 0 && (stop < 0 || n < stop)) stop = n
+    if (stop < 0) {
+      if (!end) return { wait: true }
+      stop = body.length
+    }
+    const whole = !!c && c.index === stop
+    const region = body.slice(0, stop).replace(/<(\/?)antml:parameter\b/g, "<$1parameter")
+    const p = paramArgs(region, name, this.tools)
+    if (!whole && !p.closed) {
+      // no parameter and no close: a tag named in passing; a parameter
+      // left open: the call cut short (plugins#38)
+      if (!/<parameter\b/.test(region)) return { text: true }
+      return { error: CUT_SHORT }
+    }
+    return { call: { name, arguments: JSON.stringify(p.args) }, rest: whole ? body.slice(stop + c[0].length) : body.slice(stop) }
   }
 
   // block reads what follows a <tool_call> opener: {call, rest} for a
@@ -1960,11 +2047,18 @@ const DSML_INVOKE = new RegExp(String.raw`^<\s*[|｜][\s|｜]*DSML[\s|｜]*invok
 const DSML_INVOKE_AT = new RegExp(String.raw`<\s*[|｜][\s|｜]*DSML[\s|｜]*invoke\s+name\s*=`)
 const DSML_CLOSE = new RegExp(String.raw`<\s*\/\s*[|｜][\s|｜]*DSML[\s|｜]*invoke\s*>`)
 const DSML_PARAM = new RegExp(String.raw`<\s*[|｜][\s|｜]*DSML[\s|｜]*parameter\s+name\s*=\s*"([^"]+)"((?:\s+\w+\s*=\s*"[^"]*")*)\s*>([\s\S]*?)` + DSML + String.raw`parameter\s*>`, "g")
+// Anthropic's and Qwen's call tags (xmlCall): where one starts, an
+// opener still being written, the openers a wrapper is followed by, and
+// the next call's opener
+const XML_AT = /<(?:antml:)?(?:function_calls>|invoke\s+name\s*=|function=)/
+const XML_HOLD = /<(?:antml:)?(?:invoke\s[^<>]{0,300}|function=[^<>]{0,300})$/
+const XML_STARTS = ["<invoke ", "<antml:invoke ", "<function="]
+const XML_NEXT = /<(?:antml:)?invoke\s+name\s*=|<function=/
 // what is left after a call: blanks, our close, DeepSeek's tags but the
-// next call's
-const LEFTOVER = new RegExp(String.raw`^(?:\s+|<\/tool_?calls?>|<tool_?calls>|` + DSML + String.raw`(?![\s|｜]*invoke\b)[^<>]*>)+`)
+// next call's, the closes of Anthropic's and Qwen's
+const LEFTOVER = new RegExp(String.raw`^(?:\s+|<\/tool_?calls?>|<tool_?calls>|<\/(?:antml:)?(?:function_calls|invoke|function)>|` + DSML + String.raw`(?![\s|｜]*invoke\b)[^<>]*>)+`)
 // what text may be the start of, so held back
-const MARKS = [OPEN, CLOSE, "<toolcall>", "</toolcall>", "<｜DSML｜", "<|DSML|", "</｜DSML｜", "</|DSML|", '{"reasoning_content"']
+const MARKS = [OPEN, CLOSE, "<toolcall>", "</toolcall>", "<｜DSML｜", "<|DSML|", "</｜DSML｜", "</|DSML|", '{"reasoning_content"', "<function_calls>", "</function_calls>", "<antml:function_calls>", "</antml:function_calls>", "<invoke ", "<antml:invoke ", "</invoke>", "</antml:invoke>", "<function=", "</function>"]
 // reasoning a model wrote into its text as JSON
 const REASON_AT = /\{\s*"reasoning_content"\s*:/
 const MARK_MAX = Math.max(...MARKS.map((m) => m.length))

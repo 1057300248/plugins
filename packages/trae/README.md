@@ -165,6 +165,14 @@ agent's `POST https://trae-api-cn.mchost.guru/api/agent/v3/llm_utils_chat`:
     or is cut short, is never sent on as the answer: the reply ends with an
     error (a 502 without a stream), so the gateway can try again
     (plugins#38). A `<tool_call>` in backticks or a code fence is text.
+  - Kimi and MiMo sometimes write a call in the tags they were trained on:
+    Qwen's `<function=name><parameter=k>v</parameter></function>` (bare or
+    inside `<tool_call>`), or Anthropic's `<function_calls>` around one or
+    more `<invoke name="…"><parameter name="k">v</parameter></invoke>`.
+    Each is read as a call, a parameter's value as JSON unless the tool's
+    schema says string, and one cut short is an error as above. These
+    tags are read only for a tool the request declared; for any other, or
+    in backticks or a code fence, they stay text.
   - Calls from either source become OpenAI `tool_calls`. A name matching a
     requested tool but for case or punctuation (`Read`) goes on as the
     request's (`read`); any other goes on as written, so the agent can say
