@@ -5,10 +5,17 @@
 // (magpie's host.js settle). A sign-in again the same way still replaces
 // its account; one kept before the uid was is given it, so a sign-in the
 // other way no longer replaces it.
+//
+// magpie names a plugin's account by its accountId, and two of one email
+// read "email (slot)"; the accountId is the email and the way it was
+// signed in to, "email (Google)", "email (GitHub)" (#309), and an account
+// kept by its bare email is given that name when next used.
 import { test, expect, afterAll, beforeAll, afterEach } from "bun:test"
 import { homedir, tmpdir } from "node:os"
-import { realpathSync } from "node:fs"
+import { mkdirSync, realpathSync, rmSync } from "node:fs"
+import { join } from "node:path"
 import { get } from "node:http"
+import { Database } from "bun:sqlite"
 
 let plugin
 beforeAll(async () => {
@@ -21,9 +28,16 @@ const offline = async () => { throw new Error("no network in tests") }
 const real = globalThis.fetch
 globalThis.fetch = offline
 afterAll(() => (globalThis.fetch = real))
-afterEach(() => (globalThis.fetch = offline))
+const cliDir = () =>
+  process.platform === "darwin" ? join(homedir(), "Library", "Application Support", "kiro-cli") : join(homedir(), ".local", "share", "kiro-cli")
+afterEach(() => {
+  globalThis.fetch = offline
+  rmSync(cliDir(), { recursive: true, force: true })
+})
 
 const EMAIL = "same@example.com"
+const GOOGLE = EMAIL + " (Google)"
+const GITHUB = EMAIL + " (GitHub)"
 const PROFILE = "arn:aws:codewhisperer:us-east-1:111111111111:profile/TEST"
 
 // Kiro's auth service gives a token for each code, and its management API
@@ -82,8 +96,8 @@ test("a Google and a GitHub sign-in of one email are two accounts; the same way 
   const hooks = await plugin({ client: { auth: { set: async () => {} } } })
   const google = await signIn(hooks, "google")
   const github = await signIn(hooks, "github")
-  expect(google).toMatchObject({ type: "success", accountId: EMAIL, loginProvider: "Google", uid: "google" })
-  expect(github).toMatchObject({ type: "success", accountId: EMAIL, loginProvider: "Github", uid: "github" })
+  expect(google).toMatchObject({ type: "success", accountId: GOOGLE, loginProvider: "Google", uid: "google" })
+  expect(github).toMatchObject({ type: "success", accountId: GITHUB, loginProvider: "Github", uid: "github" })
 
   const all = {}
   const g = keep(all, google)
@@ -108,8 +122,10 @@ test("an account kept before the uid was is given it, by a renewal and by a requ
     throw new Error("unexpected request to " + url)
   }
   let hooks = await plugin({ client: { auth: { set: async () => {} } } })
-  expect(await hooks.auth.refresh(old)).toMatchObject({ access: "new", uid: "google" })
-  expect(await hooks.auth.refresh({ ...old, uid: "google" })).not.toHaveProperty("uid")
+  expect(await hooks.auth.refresh(old)).toMatchObject({ access: "new", uid: "google", accountId: GOOGLE })
+  const kept = await hooks.auth.refresh({ ...old, uid: "google", accountId: GOOGLE })
+  expect(kept).not.toHaveProperty("uid")
+  expect(kept).not.toHaveProperty("accountId")
 
   // a request, the models or the usage save it, once
   globalThis.fetch = async () => Response.json({ subscriptionInfo: { subscriptionTitle: "KIRO FREE" }, userInfo: { email: EMAIL } })
@@ -119,15 +135,61 @@ test("an account kept before the uid was is given it, by a renewal and by a requ
   await hooks.auth.usage(async () => stored)
   await hooks.auth.usage(async () => stored)
   expect(saves).toHaveLength(1)
-  expect(saves[0]).toMatchObject({ accountId: EMAIL, loginProvider: "Google", uid: "google", access: "old" })
+  expect(saves[0]).toMatchObject({ accountId: GOOGLE, loginProvider: "Google", uid: "google", access: "old" })
 
   // given it, a GitHub sign-in of the same email goes beside it
   const all = { kiro: { ...saves[0] } }
-  expect(keep(all, { type: "success", accountId: EMAIL, uid: "github", access: "gh" })).not.toBe("kiro")
+  expect(keep(all, { type: "success", accountId: GITHUB, uid: "github", access: "gh" })).not.toBe("kiro")
   expect(Object.keys(all)).toHaveLength(2)
   // and a Google one replaces it
-  expect(keep(all, { type: "success", accountId: EMAIL, uid: "google", access: "g2" })).toBe("kiro")
+  expect(keep(all, { type: "success", accountId: GOOGLE, uid: "google", access: "g2" })).toBe("kiro")
   expect(Object.keys(all)).toHaveLength(2)
+})
+
+test("an account kept by its bare email is given its name on first use, and a sign-in the same way then replaces it", async () => {
+  globalThis.fetch = async () => Response.json({ subscriptionInfo: { subscriptionTitle: "KIRO FREE" }, userInfo: { email: EMAIL } })
+  const saves = []
+  const hooks = await plugin({ client: { auth: { set: async (r) => void saves.push(r.body) } } })
+  // kept by 0.1.13: its uid, and the bare email
+  const old = { type: "oauth", access: "old", refresh: "r0", expires: Date.now() + 3600_000, method: "social", loginProvider: "Github",
+    uid: "github", region: "us-east-1", profileArn: PROFILE, accountId: EMAIL }
+  const u = await hooks.auth.usage(async () => old)
+  expect(u.user).toBe(GITHUB)
+  expect(saves).toHaveLength(1)
+  expect(saves[0]).toMatchObject({ accountId: GITHUB, uid: "github", access: "old" })
+
+  // the way it was signed in to, each named as Kiro's sign-in page names it
+  for (const [way, name] of [["BuilderId", "Builder ID"], ["Enterprise", "IAM Identity Center"], ["Internal", "Internal"]]) {
+    saves.length = 0
+    await hooks.auth.usage(async () => ({ ...old, access: "t-" + way, method: "idc", loginProvider: way, uid: undefined }))
+    expect(saves[0]).toMatchObject({ accountId: `${EMAIL} (${name})`, uid: way.toLowerCase() })
+  }
+
+  // named, a GitHub sign-in again replaces it, and a Google one goes beside it
+  const all = { kiro: { ...saves[0], ...{ accountId: GITHUB, uid: "github" } } }
+  kiro()
+  const again = await signIn(hooks, "github")
+  expect(keep(all, again)).toBe("kiro")
+  expect(Object.keys(all)).toHaveLength(1)
+  expect(keep(all, await signIn(hooks, "google"))).not.toBe("kiro")
+  expect(Object.keys(all)).toHaveLength(2)
+}, 20_000)
+
+test("kiro-cli's sign-in, with no way known, keeps the bare email", async () => {
+  mkdirSync(cliDir(), { recursive: true })
+  const db = new Database(join(cliDir(), "data.sqlite3"), { create: true })
+  db.exec("CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)")
+  db.prepare("INSERT INTO auth_kv VALUES (?, ?)").run("kirocli:social:token", JSON.stringify({ access_token: "t", refresh_token: "r",
+    expires_at: new Date(Date.now() + 3600_000).toISOString(), region: "us-east-1", profile_arn: PROFILE }))
+  db.close()
+  globalThis.fetch = async () => Response.json({ subscriptionInfo: { subscriptionTitle: "KIRO FREE" }, userInfo: { email: EMAIL } })
+  const saves = []
+  const hooks = await plugin({ client: { auth: { set: async (r) => void saves.push(r.body) } } })
+  const r = await (await hooks.auth.methods[1].authorize()).callback()
+  expect(r).toMatchObject({ type: "success", source: "kiro-cli", accountId: EMAIL })
+  const u = await hooks.auth.usage(async () => ({ type: "oauth", source: "kiro-cli", access: "", refresh: "", expires: 0, accountId: EMAIL }))
+  expect(u.user).toBe(EMAIL)
+  expect(saves).toHaveLength(0)
 })
 
 test("an account with its uid, or with no way known, isn't saved for one", async () => {
@@ -136,7 +198,7 @@ test("an account with its uid, or with no way known, isn't saved for one", async
   const hooks = await plugin({ client: { auth: { set: async (r) => void saves.push(r.body) } } })
   const base = { type: "oauth", access: "t", refresh: "r", expires: Date.now() + 3600_000, method: "social", region: "us-east-1",
     profileArn: PROFILE, accountId: EMAIL }
-  await hooks.auth.usage(async () => ({ ...base, loginProvider: "Github", uid: "github" }))
+  await hooks.auth.usage(async () => ({ ...base, loginProvider: "Github", uid: "github", accountId: GITHUB }))
   await hooks.auth.usage(async () => ({ ...base, access: "t2" })) // no way known: nothing to give it
   expect(saves).toHaveLength(0)
 })

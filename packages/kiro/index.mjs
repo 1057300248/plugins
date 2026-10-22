@@ -56,6 +56,15 @@ const isBuilderID = (provider) => String(provider ?? "").toLowerCase() === "buil
 // keeps a sign-in of an email already signed in as that account unless
 // both have a uid and the two differ (#309). "" when it isn't known.
 const uidOf = (loginProvider) => String(loginProvider ?? "").trim().toLowerCase()
+// nameOf is what an account is called: its email and the way it was signed
+// in to, as Kiro's sign-in page names it, so two accounts of one email read
+// apart (#309; magpie names a plugin's account by its accountId). A way not
+// known, kiro-cli's or the Kiro IDE's sign-in among them, leaves the email
+// as it is, and magpie tells two such apart by their slot.
+const WAYS = { google: "Google", github: "GitHub", builderid: "Builder ID", enterprise: "IAM Identity Center", internal: "Internal" }
+const nameOf = (email, loginProvider) => (WAYS[uidOf(loginProvider)] ? `${email} (${WAYS[uidOf(loginProvider)]})` : email)
+// a bare email: what an account was called before nameOf
+const bareEmail = (id) => typeof id === "string" && /^[^\s()]+@[^\s()]+$/.test(id)
 
 const env = (k) => process.env[k] ?? ""
 const home = () => env("HOME") || homedir()
@@ -448,11 +457,17 @@ function account(client) {
   // sign-in with another way to the same email no longer replaces it
   const uidSaved = new Set()
   const uidField = (auth) => (!auth?.uid && uidOf(auth?.loginProvider) ? { uid: uidOf(auth.loginProvider) } : {})
+  // and one called by its bare email is given its name, the way it was
+  // signed in to with it
+  const nameField = (auth) =>
+    bareEmail(auth?.accountId) && nameOf(auth.accountId, auth.loginProvider) !== auth.accountId
+      ? { accountId: nameOf(auth.accountId, auth.loginProvider) } : {}
+  const idFields = (auth) => ({ ...uidField(auth), ...nameField(auth) })
   const save = async (auth, c) => {
     if (!c.own || !client?.auth?.set) return
     const { type: _t, ...rest } = auth
     await client.auth.set({ path: { id: ID }, body: { ...rest, type: "oauth", access: c.access, refresh: c.refresh, expires: c.expires,
-      profileArn: c.profile, region: c.region, ...uidField(auth) } }).catch(() => {})
+      profileArn: c.profile, region: c.region, ...idFields(auth) } }).catch(() => {})
   }
   const creds = (auth, stale = false) =>
     locked(async () => {
@@ -490,7 +505,7 @@ function account(client) {
         }
       }
       // once per token: a save that didn't take isn't tried on every request
-      if (!saved && c.own && uidField(auth).uid && !uidSaved.has(c.access)) {
+      if (!saved && c.own && Object.keys(idFields(auth)).length && !uidSaved.has(c.access)) {
         uidSaved.add(c.access)
         await save(auth, c)
       }
@@ -513,7 +528,7 @@ function account(client) {
       const out = { access: c.access, expires: c.expires }
       if (c.refresh !== auth.refresh) out.refresh = c.refresh
       if (c.profile && c.profile !== auth.profileArn) out.profileArn = c.profile
-      return { ...out, ...uidField(auth) }
+      return { ...out, ...idFields(auth) }
     })
   return creds
 }
@@ -1423,7 +1438,7 @@ async function browserSignIn() {
       return fail(e.message)
     }
     const who = await whoIs(c)
-    const user = who.email || "Kiro account"
+    const user = who.email ? nameOf(who.email, c.loginProvider) : "Kiro account"
     finish({ type: "success", provider: ID, refresh: c.refresh, access: c.access, expires: c.expires, accountId: user,
       ...(uidOf(c.loginProvider) ? { uid: uidOf(c.loginProvider) } : {}),
       method: c.method, loginProvider: c.loginProvider, region: c.region, profileArn: who.profile,
@@ -1515,7 +1530,10 @@ export async function KiroAuthPlugin({ client } = {}) {
         const auth = await getAuth()
         if (!(auth?.type === "api" && auth.key) && auth?.type !== "oauth") return { error: "not signed in", signIn: "kept" }
         try {
-          return { ...usageOf(await usageLimits(await creds(auth), true)), signIn: "kept" }
+          const u = usageOf(await usageLimits(await creds(auth), true))
+          // named as the account is
+          if (u.user && auth.type === "oauth" && !auth.source) u.user = nameOf(u.user, auth.loginProvider)
+          return { ...u, signIn: "kept" }
         } catch (e) {
           return { error: e.message, signIn: "kept" }
         }

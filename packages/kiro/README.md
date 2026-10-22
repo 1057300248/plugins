@@ -17,14 +17,21 @@ Power) and makes its requests, in OpenCode and in magpie. Provider id:
   - Builder ID and Identity Center come back with an AWS sign-in URL and
     region. The plugin registers a client with AWS's OIDC service, sends
     the browser to AWS, and trades the code AWS returns.
-  - The account is named by the email Kiro has for it (`Get-Usage-Limits`),
-    and its plan is read from the same call.
+  - The account is named by the email Kiro has for it (`Get-Usage-Limits`)
+    and the way it was signed in to: `email (Google)`, `email (GitHub)`,
+    `email (Builder ID)`, `email (IAM Identity Center)`, `email
+    (Internal)`. Its plan is read from the same call, and its usage names
+    it the same way.
   - Kiro keeps a Google, a GitHub, a Builder ID and an Identity Center
     sign-in of one email as different accounts. The sign-in carries a `uid`
     (`google`, `github`, `builderid`, `enterprise`), so magpie keeps each one
     beside the others, and a sign-in again the same way replaces only its
-    own account. An account signed in before 0.1.13 is given its `uid` on
-    its first request, model listing, usage read or renewal.
+    own account. An account signed in before 0.1.13 is given its `uid`,
+    and one named by its bare email before 0.1.14 its name, on its first
+    request, model listing, usage read or renewal. Until then, a sign-in
+    again the same way goes beside it rather than replacing it: magpie
+    matches a sign-in by its name, and the plugin can't see the other
+    accounts to match it by `uid`.
   - A company's own identity provider (`external_idp`) is not supported
     here. Sign in with `kiro-cli login` and use the next method instead.
 - **Kiro CLI's or Kiro IDE's sign-in**: uses the account kiro-cli is signed
