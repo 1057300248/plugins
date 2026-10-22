@@ -333,25 +333,48 @@ async function managementCall(region, a, method, query, body) {
   return JSON.parse(text)
 }
 
-// profileOf finds the profile a sign-in that doesn't name one uses: an API
-// key's own, Builder ID's, or the first Kiro lists in either of its regions.
-async function profileOf(c) {
-  if (c.method === "apikey") {
-    const res = await fetch(management("us-east-1") + "/", {
-      method: "POST",
-      headers: { ...authHeaders({ token: c.access, tokenType: "API_KEY" }), "Content-Type": "application/x-amz-json-1.0",
-        "X-Amz-Target": "AmazonCodeWhispererService.GetProfile" },
-      body: "{}",
-      signal: AbortSignal.timeout(20_000),
-    })
-    if (!res.ok) {
-      const msg = `Kiro didn't take the API key: ${res.status} ${STATUS_TEXT[res.status] ?? ""}`.trimEnd()
-      throw res.status === 401 || res.status === 403 ? gone(msg) : new Error(msg)
-    }
-    const arn = (await res.json().catch(() => null))?.profile?.arn
-    if (!arn) throw new Error("Kiro didn't say which profile the API key is for")
-    return arn
+// controlCall is one of Kiro's management operations as kiro-cli sends it
+// for an API key: AWS JSON 1.0, the operation named in X-Amz-Target, POSTed
+// to the endpoint's root (with ?origin=KIRO_CLI where kiro-cli adds it).
+async function controlCall(region, a, target, body, query) {
+  const res = await fetch(management(region) + "/" + (query ? "?" + new URLSearchParams(query) : ""), {
+    method: "POST",
+    headers: { ...authHeaders(a), "Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": target,
+      "x-amzn-codewhisperer-optout": "false" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
+  })
+  const text = await res.text()
+  if (!res.ok) throw new KiroError(res.status, text)
+  return JSON.parse(text)
+}
+
+// KEY_REGIONS are where kiro-cli asks GetProfile for an API key's profile,
+// in its order (the GovCloud and ISO ones after them aren't Kiro's
+// subscriptions).
+const KEY_REGIONS = ["us-east-1", "eu-central-1"]
+
+// keyProfile is an API key's profile, as kiro-cli finds it: GetProfile in
+// each region until one answers with a profile. kiro-cli goes on without
+// one when every region turns it down (a key from an account with no
+// CodeWhisperer profile answers 400), and so does this: "" then, and the
+// key's calls are made in us-east-1 without a profile, as kiro-cli makes
+// them (Hollowhere, on magpie's Discord: a key kiro-cli 2.33.1 served
+// failed every request here with "Kiro didn't take the API key: 400").
+async function keyProfile(c) {
+  for (const region of KEY_REGIONS) {
+    try {
+      const arn = (await controlCall(region, { token: c.access, tokenType: "API_KEY" }, "AmazonCodeWhispererService.GetProfile", {}))
+        ?.profile?.arn
+      if (arn) return arn
+    } catch {}
   }
+  return ""
+}
+
+// profileOf finds the profile a sign-in that doesn't name one uses:
+// Builder ID's, or the first Kiro lists in either of its regions.
+async function profileOf(c) {
   if (c.builderID) return BUILDER_ID_PROFILE
   let last
   for (const region of ["us-east-1", "eu-central-1"]) {
@@ -370,6 +393,8 @@ async function profileOf(c) {
 
 // usageLimits is Get-Usage-Limits: the plan, the account's email, credits.
 function usageLimits(a, email) {
+  // an API key's, as kiro-cli asks for it: no profile, no email asked
+  if (a.tokenType === "API_KEY") return controlCall(a.region, a, "AmazonCodeWhispererService.GetUsageLimits", { origin: "KIRO_CLI" }, { origin: "KIRO_CLI" })
   return managementCall(a.region, a, "Get-Usage-Limits",
     { origin: "KIRO_CLI", profileArn: a.profile, resourceType: "CREDIT", isEmailRequired: String(email) })
 }
@@ -497,7 +522,12 @@ function account(client) {
           saved = true
         }
       }
-      if (!c.profile) {
+      if (c.method === "apikey") {
+        if (!c.asked) {
+          c.profile = await keyProfile(c)
+          c.asked = true
+        }
+      } else if (!c.profile) {
         c.profile = await profileOf(c)
         if (!auth?.profileArn && !saved) {
           await save(auth, c)
@@ -510,7 +540,10 @@ function account(client) {
         await save(auth, c)
       }
       held = { id, c }
-      return { token: c.access, tokenType: tokenType(c), profile: c.profile, region: regionOf(c.profile, c.region) }
+      // kiro-cli names no profile in an API key's calls, even one GetProfile
+      // found; the profile only says the key's region
+      const profile = c.method === "apikey" ? "" : c.profile
+      return { token: c.access, tokenType: tokenType(c), profile, region: regionOf(c.profile, c.region) }
     })
   // renew is auth.refresh's: a sign-in kept here (not kiro-cli's or the
   // IDE's, which their owners keep) renewed under the same lock as the
@@ -584,9 +617,25 @@ function runtimeModel(m) {
 // picks a model for each request.
 const MODELS = [{ id: "auto", name: "Auto" }]
 
+// keyModels is an API key's list, asked as kiro-cli asks it: Kiro's
+// control plane's ListAvailableModels, with no profile, each page.
+async function keyModels(a) {
+  const out = { models: [] }
+  let next
+  for (let i = 0; i < 20; i++) {
+    const page = await controlCall(a.region, a, "KiroControlPlaneBearerService.ListAvailableModels",
+      { origin: "KIRO_CLI", ...(next ? { nextToken: next } : {}) }, { origin: "KIRO_CLI" })
+    out.models.push(...(page?.models ?? []))
+    out.defaultModel ??= page?.defaultModel
+    next = page?.nextToken
+    if (!next) break
+  }
+  return out
+}
+
 // listModels is List-Available-Models, the default first.
 async function listModels(a) {
-  const out = await managementCall(a.region, a, "List-Available-Models", { origin: "KIRO_CLI", profileArn: a.profile })
+  const out = a.tokenType === "API_KEY" ? await keyModels(a) : await managementCall(a.region, a, "List-Available-Models", { origin: "KIRO_CLI", profileArn: a.profile })
   const list = []
   for (const m of out?.models ?? []) {
     if (!m?.modelId) continue

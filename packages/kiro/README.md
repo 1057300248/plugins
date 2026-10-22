@@ -46,8 +46,12 @@ Power) and makes its requests, in OpenCode and in magpie. Provider id:
   kiro-cli refreshes its own token first (`kiro-cli debug refresh-auth-token`).
   A token the plugin refreshes itself is written back, so kiro-cli and the
   IDE go on with it.
-- **Kiro API key (`ksk_…`)**: sent with `tokentype: API_KEY`. Its profile is
-  found with `GetProfile`.
+- **Kiro API key (`ksk_…`)**: sent with `tokentype: API_KEY`, as kiro-cli
+  sends it. `GetProfile` is asked in us-east-1, then eu-central-1, for the
+  region the key's profile is in; a key it finds none for is used in
+  us-east-1, as kiro-cli uses it. Its models are listed with the control
+  plane's `ListAvailableModels` and its credits with `GetUsageLimits`, and
+  no profile is named in its calls, as kiro-cli names none.
 
 A browser sign-in is kept where OpenCode keeps sign-ins (`auth.json`; in
 magpie, `plugin-auth.json`) as an `oauth` entry. The entry holds the
