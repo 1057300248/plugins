@@ -14,8 +14,8 @@ const catalog = { get: async () => [claude, gpt] }
 test("variants advertise schema levels, not made-up budgets or model-name capabilities", () => {
   for (const m of [claude, gpt]) for (const got of [_internal.configModel(m), _internal.runtimeModel(m)]) {
     expect(Object.keys(got.variants)).toEqual(m.effort.levels)
-    expect(got.variants.xhigh).toEqual({ effort: "xhigh" })
-    expect(got.variants.max).toEqual({ effort: "max" })
+    expect(got.variants.xhigh).toEqual(m === gpt ? { reasoningEffort: "xhigh" } : { effort: "xhigh" })
+    expect(got.variants.max).toEqual(m === gpt ? { reasoningEffort: "max" } : { effort: "max" })
   }
   expect(_internal.configModel({ id: "claude-unknown" }).variants).toBeUndefined()
   expect(_internal.runtimeModel({ id: "auto" }).variants).toEqual({})
@@ -88,4 +88,28 @@ test("ordinary requests need no model catalog and receive no guessed default eff
   const cfg = {}
   await hooks.config(cfg)
   expect(cfg.provider.kiro.models.auto.variants).toBeUndefined()
+})
+
+test("native Claude adaptive effort never invents a 20k budget, while an explicit budget stays independent", async () => {
+  const sent = []
+  globalThis.fetch = async (_url, init) => { sent.push(JSON.parse(init.body)); return new Response("", { status: 503 }) }
+  for (const effort of ["xhigh", "max"]) {
+    await _internal.generate(creds, {}, req({ output_config: { effort }, thinking: { type: "adaptive", display: "summarized" } }), undefined, catalog)
+    expect(sent.at(-1).additionalModelRequestFields).toEqual({ output_config: { effort } })
+    expect(JSON.stringify(sent.at(-1))).not.toContain("max_thinking_length")
+  }
+  await _internal.generate(creds, {}, req({ output_config: { effort: "high" }, thinking: { type: "enabled", budget_tokens: 1234 } }), undefined, catalog)
+  expect(JSON.stringify(sent.at(-1))).toContain("<max_thinking_length>1234</max_thinking_length>")
+})
+
+test("a renewed account must confirm native capabilities before retrying", async () => {
+  let generations = 0
+  const lookups = []
+  globalThis.fetch = async () => { generations++; return new Response("", { status: 403 }) }
+  const rotating = async (_auth, stale) => ({ ...(await creds()), token: stale ? "new-account" : "old-account", profile: stale ? "new-profile" : "" })
+  const scoped = { get: async (a) => { lookups.push(a.token); return a.token === "old-account" ? [claude] : [model(claude.id, "output_config", ["low"])] } }
+  const res = await _internal.generate(rotating, {}, req({ output_config: { effort: "xhigh" } }), undefined, scoped)
+  expect(res.status).toBe(502)
+  expect(generations).toBe(1)
+  expect(lookups).toEqual(["old-account", "new-account"])
 })
