@@ -1,15 +1,91 @@
-import { test, expect } from "bun:test"
-import { _internal } from "./index.mjs"
+import { test, expect, afterEach } from "bun:test"
+import { _internal, KiroAuthPlugin } from "./index.mjs"
 
-// Claude Code's levels are low, medium, high, xhigh and max: a thinking
-// model offers each, so xhigh isn't routed as max (#120)
-test("a thinking model offers xhigh as its own level", () => {
-  const m = { id: "claude-opus-5.5", name: "Claude Opus 5.5", context: 200000 }
-  for (const got of [_internal.configModel(m), _internal.runtimeModel(m)]) {
-    expect(Object.keys(got.variants)).toEqual(["low", "medium", "high", "xhigh", "max"])
-    expect(got.variants.xhigh).toEqual({ thinking: { type: "enabled", budgetTokens: 50000 } })
+const realFetch = globalThis.fetch
+afterEach(() => { globalThis.fetch = realFetch })
+const schema = (path, levels) => ({ properties: { [path]: { properties: { effort: { enum: levels, default: "max" } } } } })
+const model = (id, path, levels) => ({ id, name: id, effort: _internal.effortSupport(schema(path, levels)) })
+const claude = model("claude-opus-test", "output_config", ["low", "high", "xhigh", "max"])
+const gpt = model("gpt-test", "reasoning", ["none", "low", "high", "xhigh", "max"])
+const req = (more = {}) => ({ model: claude.id, messages: [{ role: "user", content: "hello" }], ...more })
+const creds = async () => ({ token: "synthetic-token", tokenType: "BEARER", region: "us-east-1", profile: "" })
+const catalog = { get: async () => [claude, gpt] }
+
+test("variants advertise schema levels, not made-up budgets or model-name capabilities", () => {
+  for (const m of [claude, gpt]) for (const got of [_internal.configModel(m), _internal.runtimeModel(m)]) {
+    expect(Object.keys(got.variants)).toEqual(m.effort.levels)
+    expect(got.variants.xhigh).toEqual({ effort: "xhigh" })
+    expect(got.variants.max).toEqual({ effort: "max" })
   }
-  expect(_internal.thinking({ output_config: { effort: "xhigh" } }, "claude-opus-5.5")).toBe(50000)
-  // a model that doesn't think offers none
-  expect(_internal.configModel({ id: "deepseek-3.2", name: "DeepSeek" }).variants).toBeUndefined()
+  expect(_internal.configModel({ id: "claude-unknown" }).variants).toBeUndefined()
+  expect(_internal.runtimeModel({ id: "auto" }).variants).toEqual({})
+  for (const bad of [null, {}, { properties: { reasoning: { properties: { effort: { enum: "high" } } } } }])
+    expect(_internal.effortSupport(bad)).toBeNull()
+})
+
+test("actual serialized Kiro requests keep native xhigh and max distinct for both schema paths", async () => {
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    expect(String(url)).toEndWith("/generateAssistantResponse")
+    seen.push(JSON.parse(init.body))
+    return new Response("fixture rejection after capture", { status: 503 })
+  }
+  for (const m of [claude, gpt]) for (const effort of ["xhigh", "max"]) {
+    await _internal.generate(creds, {}, req({ model: m.id, output_config: { effort } }), undefined, catalog)
+    const sent = seen.at(-1)
+    expect(sent.additionalModelRequestFields).toEqual({ [m.effort.path]: { effort } })
+    expect(JSON.stringify(sent)).not.toContain("max_thinking_length")
+    expect(JSON.stringify(sent)).not.toContain("synthetic-token")
+  }
+  expect(seen).toHaveLength(4)
+})
+
+test("explicit effort wins over suffix; invalid and conflicting requests never generate", async () => {
+  expect(_internal.nativeRequest(req({ model: claude.id + ":max", reasoning: { effort: "low" } }), [claude]))
+    .toEqual({ model: claude.id, fields: { output_config: { effort: "low" } } })
+  expect(_internal.nativeRequest(req({ model: claude.id + ":xhigh" }), [claude]).fields)
+    .toEqual({ output_config: { effort: "xhigh" } })
+  let calls = 0
+  const noCreds = async () => { calls++; return creds() }
+  globalThis.fetch = async () => { throw new Error("must not generate") }
+  for (const more of [
+    { output_config: { effort: "ultra" } }, { output_config: { effort: null } },
+    { output_config: { effort: "low" }, reasoning_effort: "max" },
+    { output_config: { effort: "high" }, thinking: { type: "disabled" } },
+    { model: gpt.id, thinking: { type: "enabled", budget_tokens: 32000 } },
+    { model: "auto", output_config: { effort: "high" } },
+  ]) expect((await _internal.generate(noCreds, {}, req(more), undefined, catalog)).status).toBe(400)
+  expect(calls).toBe(0)
+  for (const more of [{ output_config: { effort: "none" } }, { model: "claude-unknown", reasoning_effort: "high" }])
+    expect((await _internal.generate(creds, {}, req(more), undefined, catalog)).status).toBe(400)
+})
+
+test("native effort, thinking budget, adaptive fallback and display are independent", async () => {
+  expect(_internal.thinking(req({ output_config: { effort: "max" } }), claude.id)).toBe(0)
+  expect(_internal.thinking(req({ output_config: { effort: "max" }, thinking: { type: "enabled", budget_tokens: 1234 } }), claude.id)).toBe(1234)
+  expect(_internal.thinking(req({ thinking: { type: "adaptive" } }), claude.id)).toBe(20000)
+  expect(_internal.nativeRequest(req({ model: gpt.id, reasoning_effort: "none", thinking: { type: "disabled" } }), [gpt]).fields)
+    .toEqual({ reasoning: { effort: "none" } })
+  expect(() => _internal.validateThinking(req({ thinking: { type: "adaptive", budget_tokens: 1234 } }))).toThrow()
+  expect(() => _internal.validateThinking(req({ thinking: { type: "enabled", display: "unknown" } }))).toThrow()
+  async function* source() { yield { kind: "think", text: "hidden" }; yield { kind: "sig", text: "sig" }; yield { kind: "text", text: "visible" } }
+  const shown = []
+  for await (const e of _internal.visibleEvents(source(), "omitted")) shown.push(e)
+  expect(shown).toEqual([{ kind: "text", text: "visible" }])
+})
+
+test("ordinary requests need no model catalog and receive no guessed default effort", async () => {
+  let calls = 0
+  globalThis.fetch = async (_url, init) => {
+    const sent = JSON.parse(init.body)
+    expect(sent.additionalModelRequestFields).toBeUndefined()
+    calls++
+    return new Response("", { status: 503 })
+  }
+  await _internal.generate(creds, {}, req(), undefined, { get: async () => { throw new Error("must not list") } })
+  expect(calls).toBe(1)
+  const hooks = await KiroAuthPlugin()
+  const cfg = {}
+  await hooks.config(cfg)
+  expect(cfg.provider.kiro.models.auto.variants).toBeUndefined()
 })

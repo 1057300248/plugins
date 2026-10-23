@@ -571,18 +571,57 @@ function account(client) {
 const windows = new Map() // a model's context, as Kiro last listed it
 
 const thinks = (id) => /claude/i.test(id) || id === "auto"
-// the levels a thinking model offers, as the built-in thinks them (xhigh as
-// long as max: #120)
-const BUDGETS = { low: 10000, medium: 20000, high: 30000, xhigh: 50000, max: 50000 }
+const EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+// Only the catalog can say which native field and levels a model accepts.
+// Do not derive effort support from a model's name or a token budget.
+function effortSupport(schema) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return null
+  for (const path of ["output_config", "reasoning"]) {
+    const values = schema.properties?.[path]?.properties?.effort?.enum
+    if (!Array.isArray(values)) continue
+    const levels = [...new Set(values.filter((v) => typeof v === "string" && EFFORTS.includes(v)))]
+    if (levels.length) return { path, levels }
+  }
+  return null
+}
+
+const variantsOf = (m) => m.effort
+  ? Object.fromEntries(m.effort.levels.map((effort) => [effort, { effort }]))
+  : {}
+
+// Account-scoped, short-lived, memory-only catalog. No raw catalog records or
+// credentials are attached to models. A failed lookup is never cached, and a
+// model without an effort schema is looked up again on its next effort request.
+function modelCatalog() {
+  const entries = new Map()
+  const pending = new Map()
+  const keyOf = (a) => createHash("sha256").update(JSON.stringify([a.tokenType, a.token, a.region, a.profile])).digest("hex")
+  return {
+    async get(a, model, refresh = false) {
+      const key = keyOf(a)
+      const hit = entries.get(key)
+      if (!refresh && hit && Date.now() - hit.at < 300000 && (!model || hit.list.some((m) => m.id === model && m.effort))) return hit.list
+      if (pending.has(key)) return pending.get(key)
+      const run = listModels(a).then((list) => {
+        entries.delete(key)
+        entries.set(key, { at: Date.now(), list })
+        while (entries.size > 16) entries.delete(entries.keys().next().value)
+        return list
+      }).finally(() => pending.delete(key))
+      pending.set(key, run)
+      return run
+    },
+  }
+}
 
 function configModel(m) {
   return {
     name: m.name,
     limit: { context: m.context ?? 0, output: m.output ?? 0 },
     ...(m.images ? { attachment: true, modalities: { input: ["text", "image"], output: ["text"] } } : {}),
-    ...(thinks(m.id)
-      ? { reasoning: true, variants: Object.fromEntries(Object.entries(BUDGETS).map(([k, b]) => [k, { thinking: { type: "enabled", budgetTokens: b } }])) }
-      : {}),
+    ...(thinks(m.id) || m.effort ? { reasoning: true } : {}),
+    ...(m.effort ? { variants: variantsOf(m) } : {}),
     tool_call: true,
   }
 }
@@ -601,7 +640,7 @@ function runtimeModel(m) {
     limit: { context: m.context ?? 0, output: m.output ?? 0 },
     capabilities: {
       temperature: true,
-      reasoning: thinks(m.id),
+      reasoning: thinks(m.id) || !!m.effort,
       attachment: !!m.images,
       toolcall: true,
       input,
@@ -609,7 +648,7 @@ function runtimeModel(m) {
       interleaved: false,
     },
     release_date: "",
-    variants: thinks(m.id) ? Object.fromEntries(Object.entries(BUDGETS).map(([k, b]) => [k, { thinking: { type: "enabled", budgetTokens: b } }])) : {},
+    variants: variantsOf(m),
   }
 }
 
@@ -642,7 +681,8 @@ async function listModels(a) {
     let name = m.modelName
     if (!name || name === m.modelId) name = m.modelId === "auto" ? "Auto" : m.modelId
     const model = { id: m.modelId, name, context: m.tokenLimits?.maxInputTokens ?? 0, output: m.tokenLimits?.maxOutputTokens ?? 0,
-      images: (m.supportedInputTypes ?? []).some((t) => String(t).toUpperCase() === "IMAGE") }
+      images: (m.supportedInputTypes ?? []).some((t) => String(t).toUpperCase() === "IMAGE"),
+      effort: effortSupport(m.additionalModelRequestFieldsSchema) }
     if (m.modelId === out?.defaultModel?.modelId) list.unshift(model)
     else list.push(model)
   }
@@ -717,16 +757,66 @@ function documentText(p) {
   return `${title}[a ${p.source?.media_type ?? "document"} attachment]`
 }
 
-// thinking is whether the model is asked to think aloud, and for how
-// long: when the caller asked for it, of a Claude model (or Auto).
+// Native effort is not a thinking switch, a display setting or a token budget.
+// Multiple explicit spellings must agree; a model suffix is only a fallback.
+function requestEffort(req) {
+  const values = []
+  for (const [obj, key] of [[req.output_config, "effort"], [req.reasoning, "effort"], [req, "reasoning_effort"]]) {
+    if (obj && Object.hasOwn(obj, key)) values.push(obj[key])
+  }
+  for (const value of values)
+    if (typeof value !== "string" || !EFFORTS.includes(value)) throw new Error("invalid reasoning effort; use a level advertised by this Kiro model")
+  if (new Set(values).size > 1) throw new Error("conflicting explicit reasoning effort fields")
+  return values[0]
+}
+
+function validateThinking(req) {
+  const t = req.thinking
+  if (t === undefined) return
+  if (!t || typeof t !== "object" || Array.isArray(t) || !["enabled", "adaptive", "disabled"].includes(t.type))
+    throw new Error("thinking.type must be enabled, adaptive or disabled")
+  if (t.budget_tokens !== undefined && (t.type !== "enabled" || !Number.isSafeInteger(t.budget_tokens) || t.budget_tokens <= 0))
+    throw new Error("thinking.budget_tokens must be a positive integer with thinking.type enabled")
+  if (t.display !== undefined && !["summarized", "omitted"].includes(t.display))
+    throw new Error("thinking.display must be summarized or omitted")
+  if (t.type === "disabled" && requestEffort(req) !== undefined && requestEffort(req) !== "none")
+    throw new Error("disabled thinking conflicts with a non-none reasoning effort")
+  if (requestEffort(req) === "none" && t.type !== "disabled")
+    throw new Error("effort none conflicts with enabled or adaptive thinking")
+}
+
+// Legacy prompt thinking remains opt-in and independent of native effort.
+// Adaptive keeps the existing 20k legacy fallback; no effort selects a budget.
 function thinking(req, model) {
-  const effort = req.output_config?.effort ?? ""
-  const on = req.thinking?.type === "enabled" || req.thinking?.type === "adaptive" || (effort && effort !== "low")
-  if (!on || !thinks(String(model).toLowerCase())) return 0
-  const budget = { low: 10000, high: 30000, xhigh: 50000, max: 50000 }[effort]
-  if (budget) return budget
-  if (!effort && req.thinking?.budget_tokens > 0) return req.thinking.budget_tokens
-  return 20000
+  if (!["enabled", "adaptive"].includes(req.thinking?.type)) return 0
+  if (!thinks(String(model).toLowerCase()))
+    throw new Error("this Kiro model cannot use an Anthropic thinking budget; send its native reasoning effort instead (a budget cannot recover xhigh or max)")
+  return req.thinking.type === "enabled" ? (req.thinking.budget_tokens ?? 20000) : 20000
+}
+
+function nativeRequest(req, list) {
+  const asked = String(req.model ?? "auto")
+  const suffix = /:(none|minimal|low|medium|high|xhigh|max)$/.exec(asked)
+  let model = list.find((m) => m.id === asked)
+  let effort = requestEffort(req)
+  if (!model && suffix) {
+    model = list.find((m) => m.id === asked.slice(0, -suffix[0].length))
+    effort ??= suffix[1]
+  }
+  if (!model?.effort || model.id === "auto") throw new Error("Kiro has not advertised native effort support for this model")
+  if (!model.effort.levels.includes(effort))
+    throw new Error("unsupported reasoning effort for " + model.id + "; supported: " + model.effort.levels.join(", "))
+  if (req.thinking?.type === "disabled" && effort !== "none")
+    throw new Error("disabled thinking conflicts with a non-none reasoning effort")
+  if (effort === "none" && ["enabled", "adaptive"].includes(req.thinking?.type))
+    throw new Error("effort none conflicts with enabled or adaptive thinking")
+  return { model: model.id, fields: { [model.effort.path]: { effort } } }
+}
+
+// Display only changes the response presented to the caller, never effort or
+// the upstream budget. Both text-tag and native reasoning events are covered.
+async function* visibleEvents(it, display) {
+  for await (const e of it) if (display !== "omitted" || (e.kind !== "think" && e.kind !== "sig")) yield e
 }
 
 // formatText is the structured output a request asks for, said in words:
@@ -741,7 +831,7 @@ function formatText(req) {
 }
 
 // buildKiro is the body of a generateAssistantResponse call.
-function buildKiro(req, model, profile, budget) {
+function buildKiro(req, model, profile, budget, fields) {
   const entries = []
   // the messages the caller marked for its prompt cache (cache_control),
   // which go to Kiro as a cachePoint on the message they end up in (#110)
@@ -856,6 +946,7 @@ function buildKiro(req, model, profile, budget) {
   const format = formatText(req)
   if (format) system = system ? system + "\n\n" + format : format
   if (budget) system = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>` + (system ? "\n" + system : "")
+
   if (system) entries[0].userInputMessage.content = system + "\n\n" + entries[0].userInputMessage.content
   if (Array.isArray(req.system)) mark(entries[0].userInputMessage, req.system)
 
@@ -897,6 +988,7 @@ function buildKiro(req, model, profile, budget) {
   if (entries.length > 1) state.history = entries.slice(0, -1)
   const out = { conversationState: state, agentMode: "vibe" }
   if (profile) out.profileArn = profile
+  if (fields) out.additionalModelRequestFields = fields
   return JSON.stringify(out)
 }
 
@@ -1318,18 +1410,46 @@ async function reply(it, model, stream, names = new Map()) {
 // refreshed, when Kiro turns the token down (403). As the built-in: no
 // credentials is a 401, a failed refresh after the 403 a 502; none marks
 // the account.
-async function generate(creds, auth, req, signal) {
-  const model = String(req.model ?? "auto")
-  const budget = thinking(req, model)
+async function generate(creds, auth, req, signal, catalog = modelCatalog()) {
+  if (!req || typeof req !== "object" || Array.isArray(req)) return errorResponse(400, "a request must be a JSON object")
+  const requestedModel = String(req.model ?? "auto")
+  let model = requestedModel
+  let effort
+  let budget
+  try {
+    effort = requestEffort(req)
+    validateThinking(req)
+    budget = thinking(req, model)
+    if (model === "auto" && effort !== undefined) throw new Error("Kiro Auto does not advertise a native effort field; select a named model")
+  } catch (e) {
+    return errorResponse(400, e.message)
+  }
   let a
   try {
     a = await creds(auth)
   } catch (e) {
     return errorResponse(401, e.message)
   }
+  let fields
+  if (effort !== undefined || /:(none|minimal|low|medium|high|xhigh|max)$/.test(model)) {
+    let list
+    try {
+      list = await catalog.get(a, model)
+    } catch {
+      return errorResponse(502, "could not confirm Kiro's native effort capability; no generation request was sent")
+    }
+    try {
+      const native = nativeRequest(req, list)
+      model = native.model
+      fields = native.fields
+      budget = thinking(req, model)
+    } catch (e) {
+      return errorResponse(400, e.message)
+    }
+  }
   let res
   try {
-    res = await sendKiro(a, buildKiro(req, model, a.profile, budget), signal)
+    res = await sendKiro(a, buildKiro(req, model, a.profile, budget, fields), signal)
   } catch (e) {
     if (e?.name === "AbortError") throw e
     return errorResponse(502, e.message)
@@ -1342,18 +1462,20 @@ async function generate(creds, auth, req, signal) {
       return errorResponse(502, e.message)
     }
     try {
-      res = await sendKiro(a, buildKiro(req, model, a.profile, budget), signal)
+      res = await sendKiro(a, buildKiro(req, model, a.profile, budget, fields), signal)
     } catch (e) {
       if (e?.name === "AbortError") throw e
       return errorResponse(502, e.message)
     }
   }
   if (!res.ok) {
-    // Kiro's own 401 is passed on, as the built-in did, the sign-in kept
     const f = failure(res.status, (await res.text()).slice(0, 1 << 20))
     return errorResponse(f.status, f.message)
   }
-  return kept(await reply(events(res.body, model, budget), model, req.stream === true, toolNames(req)))
+  const native = fields?.output_config?.effort ?? fields?.reasoning?.effort
+  const splitThinking = budget > 0 || (thinks(model) && native !== undefined && native !== "none")
+  const it = visibleEvents(events(res.body, model, splitThinking), req.thinking?.display)
+  return kept(await reply(it, requestedModel, req.stream === true, toolNames(req)))
 }
 
 // ---- signing in ----------------------------------------------------------------------
@@ -1537,6 +1659,7 @@ async function bodyOf(input, init) {
 
 export async function KiroAuthPlugin({ client } = {}) {
   const creds = account(client)
+  const catalog = modelCatalog()
   return {
     auth: {
       provider: ID,
@@ -1569,7 +1692,7 @@ export async function KiroAuthPlugin({ client } = {}) {
             } catch {
               return errorResponse(400, "a request that isn't JSON")
             }
-            return generate(creds, (await getAuth()) ?? auth, req, init.signal)
+            return generate(creds, (await getAuth()) ?? auth, req, init.signal, catalog)
           },
         }
       },
@@ -1610,7 +1733,7 @@ export async function KiroAuthPlugin({ client } = {}) {
       async models(provider, { auth } = {}) {
         if (!(auth?.type === "api" && auth.key) && auth?.type !== "oauth") return provider.models
         try {
-          const list = await listModels(await creds(auth))
+          const list = await catalog.get(await creds(auth), undefined, true)
           return Object.fromEntries(list.map((m) => [m.id, runtimeModel(m)]))
         } catch {
           return provider.models
@@ -1621,4 +1744,4 @@ export async function KiroAuthPlugin({ client } = {}) {
 }
 
 // for tests
-export const _internal = { generate, refresh, usageOf, buildKiro, events, reply, failure, toolID, toolName, toolNames, thinking, configModel, runtimeModel, readCLI, readIDE, regionOf, planName, frames }
+export const _internal = { effortSupport, requestEffort, validateThinking, nativeRequest, modelCatalog, visibleEvents, listModels, generate, refresh, usageOf, buildKiro, events, reply, failure, toolID, toolName, toolNames, thinking, configModel, runtimeModel, readCLI, readIDE, regionOf, planName, frames }
