@@ -92,8 +92,11 @@ WorkBuddy's default system prompt in its place: WorkBuddy checks only the
 system and assistant messages, and the line it matched is then in neither.
 A system message later in the chat becomes a user message where it stands.
 The plugin remembers each refused system prompt while it is loaded, so that
-agent's next chats go moved at once. A refusal that stands after the move
-(words in an assistant message) ends in a hint that names no one client
+agent's next chats go moved at once. The move can't reach an assistant
+message, so words the model quotes back into one keep that chat refused
+until they are in the list reworded in every message (since 0.1.30, the "Web GUI whose URL the runtime
+context names" line, #291); otherwise only a new chat clears it. A refusal
+that stands after the move ends in a hint that names no one client
 (since 0.1.28): WorkBuddy refused words in this client's prompt; use it from
 Hermes, OpenCode or Pi, or add another provider to the group. Neither
 refusal rests the account.

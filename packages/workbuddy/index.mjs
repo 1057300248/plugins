@@ -467,6 +467,11 @@ const FLAGGED = [
   // WorkBuddy refuses as 11128 (magpie-community/plugins#279; the same
   // refusal traced in smart-open/TraeWorkAssistant#125).
   [/You are an AI agent powered by DeepSeek Harness\.?/gi, "You are an AI agent that helps the user with programming tasks."],
+  // A line WorkBuddy refuses in a long DeepSeek Harness chat, measured 400
+  // then 200 with this wording by tearslee (magpie-community/plugins#291). The
+  // model can quote it back into an assistant message, which the move to
+  // the user's instructions can't reach, so it is reworded in every message.
+  [/Web GUI whose URL the runtime context names\.\s+When the user refers/gi, "Web GUI whose URL the runtime context names. The interface, when the user refers"],
 ]
 
 function unflagged(text) {
