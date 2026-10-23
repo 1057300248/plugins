@@ -1417,6 +1417,10 @@ async function reply(it, model, stream, names = new Map()) {
 // Declaring these models on Chat keeps reasoning_effort intact before fetch.
 function chatInput(raw) {
   if (!raw || typeof raw !== "object" || !Array.isArray(raw.messages)) throw new Error("Chat messages must be an array")
+  if (raw.n !== undefined && raw.n !== 1) throw new Error("Kiro Chat supports n=1 only")
+  if (raw.parallel_tool_calls === false) throw new Error("Kiro Chat cannot enforce parallel_tool_calls=false")
+  if (raw.stop !== undefined && raw.stop !== null && raw.stop !== "" && (!Array.isArray(raw.stop) || raw.stop.length))
+    throw new Error("Kiro Chat does not support stop sequences")
   const parts = (content) => {
     if (content == null) return []
     if (typeof content === "string") return [{ type: "text", text: content }]
@@ -1496,14 +1500,14 @@ async function replyChat(it, model, stream, names, includeUsage = false) {
       else if (e.kind === "error") return failedBefore(e.text)
       else if (e.kind === "stop") return Response.json({ ...base, object: "chat.completion",
         choices: [{ index: 0, message: { role: "assistant", content: text || null,
-          ...(reasoning ? { reasoning_content: reasoning } : {}), ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason: chatStop(e.reason) }],
+          ...(reasoning ? { reasoning_content: reasoning } : {}), ...(calls.length ? { tool_calls: calls.map((c) => ({ ...c, function: { ...c.function, arguments: c.function.arguments || "{}" } })) } : {}) }, finish_reason: chatStop(e.reason) }],
         usage: chatUsage(e.usage) })
     }
     return errorResponse(502, "the reply ended before it was complete")
   }
   const head = await it.next()
   if (head.value?.kind === "error") return failedBefore(head.value.text)
-  let pending = head, started = false, toolIndex = -1
+  let pending = head, started = false, toolIndex = -1, toolHasArgs = false
   const enc = new TextEncoder()
   const data = (value) => enc.encode("data: " + (typeof value === "string" ? value : JSON.stringify(value)) + "\n\n")
   const chunk = (delta, finish_reason = null) => ({ ...base, object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }] })
@@ -1514,16 +1518,29 @@ async function replyChat(it, model, stream, names, includeUsage = false) {
       pending = null
       if (r.done) return ctl.close()
       const e = r.value
+      const finishTool = () => {
+        if (toolIndex >= 0 && !toolHasArgs) {
+          ctl.enqueue(data(chunk({ tool_calls: [{ index: toolIndex, function: { arguments: "{}" } }] })))
+          toolHasArgs = true
+        }
+      }
       if (e.kind === "text") ctl.enqueue(data(chunk({ content: e.text })))
       else if (e.kind === "think") ctl.enqueue(data(chunk({ reasoning_content: e.text })))
-      else if (e.kind === "toolStart") ctl.enqueue(data(chunk({ tool_calls: [{ index: ++toolIndex, id: e.id, type: "function",
-        function: { name: names.get(e.name) ?? e.name, arguments: "" } }] })))
-      else if (e.kind === "toolArgs") ctl.enqueue(data(chunk({ tool_calls: [{ index: toolIndex, function: { arguments: e.text } }] })))
+      else if (e.kind === "toolStart") {
+        finishTool()
+        toolHasArgs = false
+        ctl.enqueue(data(chunk({ tool_calls: [{ index: ++toolIndex, id: e.id, type: "function",
+          function: { name: names.get(e.name) ?? e.name, arguments: "" } }] })))
+      } else if (e.kind === "toolArgs") {
+        toolHasArgs = true
+        ctl.enqueue(data(chunk({ tool_calls: [{ index: toolIndex, function: { arguments: e.text } }] })))
+      }
       else if (e.kind === "error") {
         ctl.enqueue(data({ error: { type: "api_error", message: e.text } }))
         ctl.enqueue(data("[DONE]"))
         return ctl.close()
       } else if (e.kind === "stop") {
+        finishTool()
         ctl.enqueue(data(chunk({}, chatStop(e.reason))))
         if (includeUsage) ctl.enqueue(data({ ...base, object: "chat.completion.chunk", choices: [], usage: chatUsage(e.usage) }))
         ctl.enqueue(data("[DONE]"))

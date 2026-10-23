@@ -129,3 +129,29 @@ test("Chat rejects lossy content and malformed tool input instead of silently dr
   expect(() => _internal.chatInput(request({ messages: [{ role: "assistant", content: null, tool_calls: [{ id: "id", type: "function", function: { name: "t", arguments: "bad" } }] }] }))).toThrow()
   expect(() => _internal.chatInput(request({ tool_choice: "required" }))).toThrow()
 })
+
+test("zero-argument and absent-input Chat tools produce valid JSON, including successive streamed tools", async () => {
+  const events = () => _internal.events(response(
+    frame("toolUseEvent", { toolUseId: "a", name: "one", input: {} }),
+    frame("toolUseEvent", { toolUseId: "b", name: "two" })).body, "gpt-test", false)
+  const body = await (await _internal.replyChat(events(), "gpt-test", false, new Map())).json()
+  expect(body.choices[0].message.tool_calls.map((c) => JSON.parse(c.function.arguments))).toEqual([{}, {}])
+  const wire = await (await _internal.replyChat(events(), "gpt-test", true, new Map())).text()
+  const argumentsByIndex = ["", ""], names = []
+  for (const line of wire.split("\n")) {
+    if (!line.startsWith("data: ") || line === "data: [DONE]") continue
+    const c = JSON.parse(line.slice(6))
+    for (const t of c.choices?.[0]?.delta?.tool_calls ?? []) {
+      if (t.function.name) names.push(t.function.name)
+      argumentsByIndex[t.index] += t.function.arguments ?? ""
+    }
+  }
+  expect(names).toEqual(["one", "two"])
+  expect(argumentsByIndex.map((a) => JSON.parse(a))).toEqual([{}, {}])
+})
+
+test("unsupported Chat generation controls fail clearly instead of disappearing", () => {
+  for (const more of [{ n: 2 }, { parallel_tool_calls: false }, { stop: ["END"] }, { stop: "END" }])
+    expect(() => _internal.chatInput(request(more))).toThrow()
+  expect(() => _internal.chatInput(request({ n: 1, parallel_tool_calls: true, stop: [] }))).not.toThrow()
+})

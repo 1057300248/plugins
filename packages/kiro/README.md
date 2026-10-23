@@ -101,10 +101,12 @@ request:
   events (streamed) or one message. The reply includes text, thinking,
   tool calls and usage. When Kiro reports only how full the context is,
   input tokens are estimated from that.
-- Thinking (Claude models and Auto) is asked for the way kiro-cli asks, in
-  the prompt, with a budget: low 10k, medium 20k, high 30k, xhigh and max
-  50k (as magpie's built-in Kiro: #120). The
-  `<thinking>` block of the reply comes back as thinking.
+- Native reasoning effort is sent in `additionalModelRequestFields`, at
+  the path and exact level advertised by that account's model catalog.
+  It is not converted into a prompt token budget (see below).
+- Explicit legacy thinking on Claude and Auto still uses prompt tags.
+  Thinking text, whether in tags or native reasoning events, comes back
+  separately from the answer.
 - Kiro's failures keep their meaning:
   - input too long → 400
   - no capacity → 503
@@ -116,8 +118,84 @@ request:
 The `config` hook declares `auto` (Kiro picks the model). Once signed in,
 the `provider.models` hook replaces it with the account's own list from
 `List-Available-Models`, with the default first. Each model carries its
-context window, output limit and whether it takes images. Claude models
-and Auto have the thinking variants.
+context window, output limit and whether it takes images. Native effort
+variants are offered only when the model's
+`additionalModelRequestFieldsSchema` advertises an effort enum. A model
+name alone is not evidence of support; Auto has no native effort variants.
+
+GPT models whose schema advertises `reasoning.effort` use
+`@ai-sdk/openai-compatible` and Chat completions. Other models keep
+Anthropic Messages. This preserves GPT's named effort before Magpie's
+Anthropic conversion could collapse it into a token budget.
+
+## Native effort and thinking
+
+This fork implements the catalog-driven wire path; it has **not** been
+tested against a real Kiro account. The schema layout was cross-checked
+against the MIT-licensed [kirogo catalog implementation](https://github.com/jasminnanda/kirogo/blob/3b2ca22714c7296ad1a48133b3d7e0fe2ba2110e/internal/catalog/effort.go).
+That third-party evidence and mocked tests do not prove Kiro will accept a
+field or honor an effort internally. No GPL implementation was copied.
+
+- Messages input accepts `output_config.effort`, `reasoning.effort` or
+  `reasoning_effort`. These are input aliases, not support for the full
+  OpenAI Responses API. Chat input normally uses `reasoning_effort`.
+  Conflicting explicit values are rejected with HTTP 400.
+- The catalog decides the outgoing path: commonly
+  `additionalModelRequestFields.output_config.effort` for Claude or
+  `additionalModelRequestFields.reasoning.effort` for GPT. Values are
+  never clamped or inferred from a budget. `xhigh` and `max` stay
+  distinct; `none` is sent only if this model explicitly lists it.
+- A `model:level` suffix is a fallback, below an explicit request field.
+  An exact catalog model ID wins over suffix interpretation. With no
+  requested effort, no effort or schema default is injected; Kiro keeps
+  its own default.
+- Explicit effort requires a matching catalog model and schema. Missing
+  support or an unsupported level is HTTP 400; a failed catalog read is
+  HTTP 502 before generation, rather than a silent downgrade.
+  Ordinary Messages requests without effort do not depend on a catalog
+  read.
+- The catalog cache is private to each plugin instance and keyed by a
+  hash of token type, token, region and profile. It holds at most 16
+  entries for five minutes, coalesces concurrent reads, and caches no
+  failed reads. A model with no effort schema is rechecked on its next
+  effort request. `provider.models` explicitly refreshes it. Credential
+  renewal revalidates native capability before retrying generation.
+  Only normalized model fields and effort enums are retained, not raw
+  catalog records.
+- Effort does not select a legacy thinking budget. On native requests,
+  `thinking.type: adaptive` or enabled without `budget_tokens` adds no
+  default 20k prompt constraint. An explicit enabled `budget_tokens`
+  remains an independent legacy Claude prompt budget. Without native
+  effort, existing enabled/adaptive Claude/Auto requests keep the 20k
+  fallback. These prompt tags are not native thinking fields.
+- Disabled thinking plus non-`none` effort, or enabled/adaptive thinking
+  plus `none`, is rejected as contradictory. `thinking.display: omitted`
+  hides returned thinking locally; it neither changes effort nor promises
+  the server did not reason. `summarized` leaves returned thinking visible.
+- A GPT request already reduced to an Anthropic thinking budget is
+  rejected clearly: the plugin cannot reconstruct its original level.
+  Refresh the model list to select the GPT Chat route instead. Magpie can
+  still normalize unsupported levels before the plugin sees them, and
+  some host translations normalize `minimal` to `low`; this plugin
+  guarantees only the value it actually receives and validates.
+
+The narrow GPT Chat adapter shares the existing Kiro conversation builder,
+authentication, history/tool pairing and event decoder. It supports text,
+inline base64 images, function tools and results, JSON-schema output,
+streamed/non-streamed replies, reasoning text and usage. Remote image URLs,
+non-function tools, forced/disabled `tool_choice`, stop sequences,
+`parallel_tool_calls: false` and `n` other than 1 are rejected rather than
+silently discarded. Token/output caps (`max_tokens`,
+`max_completion_tokens`), `temperature` and `top_p` keep the existing
+Messages-to-Kiro limitation: this adapter does not forward or enforce
+those controls. It does not add a general Responses adapter.
+The existing tool-history and prompt-cache behavior is retained.
+
+Validation uses synthetic credentials, a temporary HOME and mocked network
+responses: `bun test packages/kiro`, `bun scripts/check.mjs kiro`, and
+`node --check packages/kiro/index.mjs`. A real Kiro call, real Magpie
+end-to-end execution, npm publishing and deployment are outside this
+change's verification.
 
 ## Not included
 
