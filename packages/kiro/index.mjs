@@ -1577,10 +1577,18 @@ async function generate(creds, auth, req, signal, catalog = modelCatalog(), prot
     return errorResponse(401, e.message)
   }
   let fields
+  let renewed = false
   if (protocol === "chat" || effort !== undefined || /:(none|minimal|low|medium|high|xhigh|max)$/.test(model)) {
     let list
     try {
-      list = await catalog.get(a, model)
+      try {
+        list = await catalog.get(a, model)
+      } catch (e) {
+        if (e?.status !== 403) throw e
+        a = await creds(auth, true)
+        renewed = true
+        list = await catalog.get(a, model)
+      }
     } catch {
       return errorResponse(502, "could not confirm Kiro's native effort capability; no generation request was sent")
     }
@@ -1602,7 +1610,7 @@ async function generate(creds, auth, req, signal, catalog = modelCatalog(), prot
     if (e?.name === "AbortError") throw e
     return errorResponse(502, e.message)
   }
-  if (res.status === 403) {
+  if (res.status === 403 && !renewed) {
     await res.body?.cancel()
     try {
       a = await creds(auth, true)

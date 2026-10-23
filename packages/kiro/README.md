@@ -79,9 +79,10 @@ Tokens are refreshed through:
 
 ## Requests
 
-Kiro has no API OpenCode speaks. The models are declared on Anthropic's
-Messages (`@ai-sdk/anthropic`), and the plugin's `fetch` handles each
-request:
+Kiro has no API OpenCode speaks. Claude and other models use Anthropic's
+Messages (`@ai-sdk/anthropic`); catalog-confirmed GPT reasoning models use
+Chat completions (`@ai-sdk/openai-compatible`). The plugin's `fetch`
+handles each request:
 
 - It sends the request to `runtime.<region>.kiro.dev/generateAssistantResponse`,
   the API kiro-cli uses, with kiro-cli's headers. The region is the one the
@@ -97,8 +98,8 @@ request:
     message that answers the call, as Kiro's tool results hold text alone.
   - Only the latest images are sent.
   - Tools the history used but the request doesn't offer are declared.
-- It turns the AWS event stream Kiro answers with back into Messages'
-  events (streamed) or one message. The reply includes text, thinking,
+- It turns the AWS event stream Kiro answers with back into the selected
+  protocol's streamed events or one response. The reply includes text, thinking,
   tool calls and usage. When Kiro reports only how full the context is,
   input tokens are estimated from that.
 - Native reasoning effort is sent in `additionalModelRequestFields`, at
@@ -151,7 +152,9 @@ field or honor an effort internally. No GPL implementation was copied.
   its own default.
 - Explicit effort requires a matching catalog model and schema. Missing
   support or an unsupported level is HTTP 400; a failed catalog read is
-  HTTP 502 before generation, rather than a silent downgrade.
+  HTTP 502 before generation, rather than a silent downgrade. A catalog
+  403 renews credentials and reads the new account's schema once; at most
+  one renewal is attempted across catalog and generation for a request.
   Ordinary Messages requests without effort do not depend on a catalog
   read.
 - The catalog cache is private to each plugin instance and keyed by a
@@ -169,7 +172,11 @@ field or honor an effort internally. No GPL implementation was copied.
   effort, existing enabled/adaptive Claude/Auto requests keep the 20k
   fallback. These prompt tags are not native thinking fields.
 - Disabled thinking plus non-`none` effort, or enabled/adaptive thinking
-  plus `none`, is rejected as contradictory. `thinking.display: omitted`
+  plus `none`, is rejected as contradictory. Disabled thinking without
+  effort only suppresses legacy prompt tags; it does not promise the
+  server will stop reasoning. To request native `none`, explicitly send
+  that effort and use a model whose schema allows it.
+  `thinking.display: omitted`
   hides returned thinking locally; it neither changes effort nor promises
   the server did not reason. `summarized` leaves returned thinking visible.
 - A GPT request already reduced to an Anthropic thinking budget is
@@ -181,8 +188,8 @@ field or honor an effort internally. No GPL implementation was copied.
 
 The narrow GPT Chat adapter shares the existing Kiro conversation builder,
 authentication, history/tool pairing and event decoder. It supports text,
-inline base64 images, function tools and results, JSON-schema output,
-streamed/non-streamed replies, reasoning text and usage. Remote image URLs,
+inline base64 images, function tools and results, prompt-based JSON-schema
+format requests (not an enforced output guarantee), streamed/non-streamed replies, reasoning text and usage. Remote image URLs,
 non-function tools, forced/disabled `tool_choice`, stop sequences,
 `parallel_tool_calls: false` and `n` other than 1 are rejected rather than
 silently discarded. Token/output caps (`max_tokens`,

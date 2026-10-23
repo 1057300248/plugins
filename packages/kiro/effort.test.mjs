@@ -113,3 +113,31 @@ test("a renewed account must confirm native capabilities before retrying", async
   expect(generations).toBe(1)
   expect(lookups).toEqual(["old-account", "new-account"])
 })
+
+test("catalog 403 renews once, rechecks the new account, and never loops or generates without support", async () => {
+  for (const outcome of ["generate", "catalog403", "generation403"]) {
+    const credentials = []
+    const lookups = []
+    let generations = 0
+    const rotating = async (_auth, stale = false) => {
+      credentials.push(stale)
+      return { ...(await creds()), token: stale ? "new-token" : "old-token" }
+    }
+    const scoped = { get: async (a) => {
+      lookups.push(a.token)
+      if (a.token === "old-token" || outcome === "catalog403")
+        throw Object.assign(new Error("synthetic directory forbidden"), { status: 403 })
+      return [claude]
+    } }
+    globalThis.fetch = async (_url, init) => {
+      generations++
+      expect(JSON.parse(init.body).additionalModelRequestFields).toEqual({ output_config: { effort: "high" } })
+      return new Response("", { status: outcome === "generation403" ? 403 : 503 })
+    }
+    const response = await _internal.generate(rotating, {}, req({ output_config: { effort: "high" } }), undefined, scoped)
+    expect(response.status).toBe(outcome === "catalog403" ? 502 : outcome === "generation403" ? 403 : 503)
+    expect(credentials).toEqual([false, true])
+    expect(lookups).toEqual(["old-token", "new-token"])
+    expect(generations).toBe(outcome === "catalog403" ? 0 : 1)
+  }
+})
