@@ -29,7 +29,7 @@ const BIGMODEL_API = "https://bigmodel.cn" // BigModel's business API, where ZCo
 const ZAI_BASE = "https://api.z.ai/api/anthropic"
 const BIGMODEL_BASE = "https://open.bigmodel.cn/api/anthropic"
 const START_BASE = ZCODE + "/api/v1/zcode-plan/anthropic"
-const APP_VERSION = "3.14.3" // the ZCode whose sign-in this makes
+const APP_VERSION = "3.16.3" // the ZCode whose sign-in this makes
 const UA = "ZCode/" + APP_VERSION
 
 // ZCode's models before its config is read; the Start Plan has all but GLM-5.3.
@@ -578,13 +578,16 @@ async function claimHint(s) {
 
 // startUsage is a gift-only account's card: its buckets, or the words
 // for having none to show. The card's header already names the plan, so
-// the windows keep their own names.
+// the windows of one plan keep their own names; with several plans each
+// bucket is named after its plan (see byPlan).
 const NO_START = "this account has no GLM Coding Plan, and ZCode's Start Plan has ended or was never started"
 async function startUsage(s) {
   const g = await giftOf(s)
   if (!g) return { error: NO_START }
   const best = bestBuckets(g.windows)
-  g.windows = g.windows.map(({ _plan, _spent, ...w }, i) => {
+  const label = byPlan(g.windows)
+  g.windows = countedFirst(g.windows.map(({ _plan, _spent, ...w }, i) => {
+    w.name = label(w.name, _plan)
     if (!w.models?.length) return w
     // a model two plans give (Trust Build's and the Start Plan's Flash)
     // counts on the bucket ZCode spends now; the other stays on the card
@@ -595,9 +598,27 @@ async function startUsage(s) {
       return { ...w, aside: true }
     }
     return { ...w, models: [...models, ...models.map(giftID)] }
-  })
+  }))
   return g
 }
+
+// byPlan names a bucket after its plan ("ZCode 1024 Dev Day · GLM-5.3")
+// when the gift's buckets come from more than one plan: two plans each
+// give a GLM-5.3, and named alike a spent one and a live one can't be
+// told apart (01huadalang, Discord: the new-user plan's spent GLM-5.3
+// showed, the 1024 plan's own GLM-5.3 didn't). One plan's buckets keep
+// their own names, as the card's header names the plan.
+function byPlan(windows) {
+  const several = new Set(windows.map((w) => w._plan || "")).size > 1
+  return (name, plan) => (several && plan ? plan + " · " + name : name)
+}
+
+// countedFirst puts the buckets a request spends before those set aside
+// (a spent bucket another plan's live one stands in for), each group in
+// the balance's order: magpie's account row shows a card's first two
+// windows and leaves the rest to its tooltip, so a spent plan listed first
+// hid the live plan's allowance for the same model.
+const countedFirst = (ws) => [...ws.filter((w) => !w.aside), ...ws.filter((w) => w.aside)]
 
 // bestBuckets is, for each model the gift's buckets serve, the index of
 // the one a request spends: a live one before a spent one, the least
@@ -641,19 +662,21 @@ async function dualUsage(s) {
       if (notModels.length) out.windows = out.windows.map((w) => w.aside ? w : { ...w, notModels })
       // Several buckets may serve one model: one spent sibling cannot block it.
       const best = bestBuckets(g.windows)
-      out.windows.push(...g.windows.map(({ _plan: p, _spent, ...w }, i) => {
+      const label = byPlan(g.windows)
+      out.windows.push(...countedFirst(g.windows.map(({ _plan: p, _spent, ...w }, i) => {
         const selected = gift.allModels.filter((m) => best.get(m.toLowerCase()) === i)
         const models = selected.map(giftID)
         const scoped = models.length ? { ...w, models } : { ...w, aside: true }
         // the card names a bucket's model as the picker does (GLM-5.3-Flash-Trial);
-        // no plan prefix — the card's section header already says the account
+        // no plan prefix while one plan gives them all — the card's section
+        // header already says the account; with several, byPlan names each
         let name = w.name
         for (const m of selected) {
           const at = name.toLowerCase().indexOf(m.toLowerCase())
           if (at >= 0) name = name.slice(0, at) + giftID(m) + name.slice(at + m.length)
         }
-        return { ...scoped, name }
-      }))
+        return { ...scoped, name: label(name, p) }
+      })))
     }
   } catch {
     if (cached) {
@@ -1400,28 +1423,152 @@ function intl() {
   }
 }
 
-// startHeaders puts ZCode's headers on a Start Plan request, jwt its key.
+// startHeaders is a Start Plan request's headers, jwt its key: ZCode's
+// own (3.16.3's Frn and Vdt in glm/zcode.cjs) and the body's content-type,
+// and nothing else. The agent's headers never go on: Claude Code's
+// anthropic-beta, x-app, x-stainless-*, anthropic-dangerous-direct-browser-
+// access and x-claude-code-session-id reach the plugin through magpie's
+// gateway, and ZCode sends none of them (no anthropic-beta at all on the
+// Start Plan: its tool search beta is for coding plans only). Accept and
+// accept-encoding are left to the HTTP client, as ZCode leaves them to
+// Node's.
 function startHeaders(h, jwt) {
-  h.delete("x-api-key")
-  h.delete("authorization")
-  h.delete("X-Device-Mid")
-  h.set("Authorization", "Bearer " + jwt)
-  h.set("anthropic-version", "2023-06-01")
-  h.set("HTTP-Referer", ZCODE)
-  h.set("User-Agent", UA + " ai-sdk/anthropic/3.0.81")
-  h.set("X-ZCode-App-Version", APP_VERSION)
-  h.set("X-Title", "Z Code@cli")
-  h.set("X-Release-Channel", "production")
+  const out = new Headers()
+  out.set("content-type", h.get("content-type") || "application/json")
+  out.set("Authorization", "Bearer " + jwt)
+  out.set("anthropic-version", "2023-06-01")
+  out.set("HTTP-Referer", ZCODE)
+  out.set("User-Agent", UA + " ai-sdk/anthropic/3.0.81")
+  out.set("X-ZCode-App-Version", APP_VERSION)
+  out.set("X-Title", "Z Code@cli")
+  out.set("X-Release-Channel", "production")
   const o = intl()
-  h.set("X-Client-Language", o.locale || "unknown")
-  if (o.timeZone) h.set("X-Client-Timezone", o.timeZone)
-  h.set("X-ZCode-Agent", "glm")
-  h.set("X-Platform", platform())
-  h.set("X-Os-Category", osCategory())
-  h.set("X-Os-Version", osVersion())
-  h.set("x-request-id", uuid())
-  h.set("x-zcode-session-type", "main")
-  h.set("x-zcode-trace-id", uuid())
+  out.set("X-Client-Language", o.locale || "unknown")
+  out.set("X-Client-Timezone", o.timeZone || "unknown")
+  out.set("X-ZCode-Agent", "glm")
+  out.set("X-Platform", platform())
+  out.set("X-Os-Category", osCategory())
+  // os.release() alone, as ZCode's buildZCodeSourceHeadersFromContext
+  // has it; the prompt's OS line is osVersion()
+  out.set("X-Os-Version", release())
+  out.set("x-request-id", uuid())
+  out.set("x-zcode-session-type", "main")
+  out.set("x-zcode-trace-id", uuid())
+  // 3.16's createModelRequestAttributionHeaders: what asked the model
+  out.set("x-zcode-query-source", "main_turn")
+  return out
+}
+
+// Claude Code's tool search, as ZCode's plans take it. Claude Code
+// (2.1.310) offers a tool named ToolSearch, names its deferred tools in a
+// system turn, and sends a deferred tool's schema with defer_loading only
+// once a search loaded it (a tool_reference in a ToolSearch result), with
+// a DeferredToolPlaceholder that keeps the search on. api.z.ai's
+// Anthropic endpoint, given a tool named exactly ToolSearch, shows the
+// model none of the other tools, Bash, Read and Write among them, but
+// those a tool_reference loaded: a subagent, which hasn't searched,
+// reports only the deferred tools, and the main turn has to search for
+// Bash before it can run it (小八 on Discord, 10-24; the beta header
+// changes nothing, the name alone does). ZCode itself sends no ToolSearch
+// and no defer_loading. So the search goes as SEARCH_ALIAS, in the tools
+// and in the turns that called it, the tools Claude Code sent with their
+// schemas go as ZCode's do, without defer_loading, and the placeholder is
+// left out; the model's calls to SEARCH_ALIAS come back as ToolSearch
+// (searchNamed).
+const SEARCH = "ToolSearch"
+const SEARCH_ALIAS = "ToolSearchTool"
+const PLACEHOLDER = "DeferredToolPlaceholder"
+
+// searchless is a Messages request body without Claude Code's ToolSearch
+// name, and whether it had the tool; anything else goes as it is.
+function searchless(text) {
+  if (typeof text !== "string" || !text.includes(`"${SEARCH}"`)) return { text, renamed: false }
+  let b
+  try {
+    b = JSON.parse(text)
+  } catch {
+    return { text, renamed: false }
+  }
+  if (!b || !Array.isArray(b.tools) || !b.tools.some((t) => t?.name === SEARCH)) return { text, renamed: false }
+  // a tool of the alias's own name keeps it; the search can't then be renamed
+  if (b.tools.some((t) => t?.name === SEARCH_ALIAS)) return { text, renamed: false }
+  b.tools = b.tools
+    .filter((t) => t?.name !== PLACEHOLDER)
+    .map((t) => {
+      if (!t || typeof t !== "object") return t
+      const { defer_loading, ...rest } = t
+      return t.name === SEARCH ? { ...rest, name: SEARCH_ALIAS } : rest
+    })
+  if (Array.isArray(b.messages))
+    for (const m of b.messages)
+      if (m?.role === "assistant" && Array.isArray(m.content))
+        for (const x of m.content) if (x?.type === "tool_use" && x.name === SEARCH) x.name = SEARCH_ALIAS
+  if (b.tool_choice?.type === "tool" && b.tool_choice.name === SEARCH) b.tool_choice.name = SEARCH_ALIAS
+  return { text: JSON.stringify(b), renamed: true }
+}
+
+// searchNamed is an answer to a request searchless renamed, the model's
+// calls to SEARCH_ALIAS named ToolSearch again, as Claude Code runs them:
+// a stream's content_block_start events, or a whole message's content.
+function searchNamed(res) {
+  if (!res.body) return res
+  const type = res.headers.get("content-type") ?? ""
+  const named = (block) => {
+    if (block?.type === "tool_use" && block.name === SEARCH_ALIAS) {
+      block.name = SEARCH
+      return true
+    }
+    return false
+  }
+  const line = (l) => {
+    if (!l.startsWith("data:") || !l.includes(`"${SEARCH_ALIAS}"`)) return l
+    try {
+      const d = JSON.parse(l.slice(5))
+      return named(d?.content_block) ? "data: " + JSON.stringify(d) : l
+    } catch {
+      return l
+    }
+  }
+  if (type.includes("text/event-stream")) {
+    const dec = new TextDecoder()
+    const enc = new TextEncoder()
+    let held = ""
+    const body = res.body.pipeThrough(
+      new TransformStream({
+        transform(chunk, ctl) {
+          held += dec.decode(chunk, { stream: true })
+          const i = held.lastIndexOf("\n")
+          if (i < 0) return
+          ctl.enqueue(enc.encode(held.slice(0, i + 1).split("\n").map(line).join("\n")))
+          held = held.slice(i + 1)
+        },
+        flush(ctl) {
+          held += dec.decode()
+          if (held) ctl.enqueue(enc.encode(line(held)))
+        },
+      }),
+    )
+    return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers })
+  }
+  if (!type.includes("json")) return res
+  return res.text().then((text) => {
+    let out = text
+    if (text.includes(`"${SEARCH_ALIAS}"`)) {
+      try {
+        const v = JSON.parse(text)
+        if (Array.isArray(v?.content) && v.content.map(named).some(Boolean)) out = JSON.stringify(v)
+      } catch {}
+    }
+    return new Response(out, { status: res.status, statusText: res.statusText, headers: res.headers })
+  })
+}
+
+// startURL is a Start Plan request's URL without the query the agent put
+// on it: Claude Code asks /v1/messages?beta=true, which magpie passes on,
+// and ZCode asks /v1/messages alone.
+function startURL(url) {
+  const i = url.indexOf("?")
+  return i < 0 ? url : url.slice(0, i)
 }
 
 // WORK_DIR and WORK_GIT are where magpie tells a plugin's fetch the agent
@@ -1627,9 +1774,18 @@ export async function ZCodeAuthPlugin({ client }) {
             // says it is spent can spend nothing and replay what was asked for
             let start = alone
             let orig, forcedGift = false
+            let renamed = false
+            const done = (res) => (renamed ? searchNamed(res) : res)
             if (opts.body != null) {
               orig = opts.body = typeof opts.body === "string" ? opts.body : await new Response(opts.body).text()
               delete opts.duplex
+              // Claude Code's tool search goes under another name, or
+              // ZCode's plans show the model no other tool (searchless)
+              const plain = searchless(orig)
+              if (plain.renamed) {
+                orig = opts.body = plain.text
+                renamed = true
+              }
               let m = modelOf(orig)
               if (m.toLowerCase().endsWith("-trial")) {
                 gift ??= await startPlan(s.jwt, s.device).catch(() => null)
@@ -1660,7 +1816,8 @@ export async function ZCodeAuthPlugin({ client }) {
               if (!s.jwt) throw new Error("ZCode's sign-in has no key; sign in again")
               swap(START_BASE)
               // the Start Plan is served only to what looks like ZCode's own request
-              startHeaders(h, s.jwt)
+              url = startURL(url)
+              h = startHeaders(h, s.jwt)
               if (opts.body != null) {
                 const text = orig ?? (typeof opts.body === "string" ? opts.body : await new Response(opts.body).text())
                 opts.body = dress(text, s.site, s.device, place)
@@ -1670,6 +1827,7 @@ export async function ZCodeAuthPlugin({ client }) {
             } else {
               if (!key) throw new Error("ZCode's sign-in has no key; sign in again")
               swap(s.base)
+              if (renamed) h.delete("content-length")
               h.delete("authorization")
               h.set("x-api-key", key)
               h.set("Authorization", "Bearer " + key)
@@ -1693,17 +1851,17 @@ export async function ZCodeAuthPlugin({ client }) {
               if (res.status >= 400 || json) {
                 const text = await res.text()
                 const spent = spentUp(text, res.status)
-                if (!spent && res.status < 400) return kept(res, text)
+                if (!spent && res.status < 400) return done(kept(res, text))
                 if (spent) {
                   for (const [k, until] of blocked) if (Date.now() >= until) blocked.delete(k)
                   blocked.set(s.key + "\0" + s.jwt + "\0" + modelOf(orig).toLowerCase(), Date.now() + 60_000)
                 }
-                return spent && res.status < 400 ? kept(new Response(text, { status: 429, headers: res.headers })) : kept(res, text)
+                return spent && res.status < 400 ? kept(new Response(text, { status: 429, headers: res.headers })) : done(kept(res, text))
               }
             }
             // the plan's answer goes on as it came, the account kept: the
             // built-in never marked a ZCode account lapsed nor cleared one
-            return kept(res)
+            return done(kept(res))
           },
         }
       },

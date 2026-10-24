@@ -296,6 +296,13 @@ the account's credentials.
 - A helper that is there but can't be read, or gives an invalid identity,
   is `failed` and asked again later, rather than a false "no activity"
   result.
+- With the identity read and sent, a list with no daily claim is
+  `inactive`, with a message (since 0.2.32) saying Qoder offered this
+  device's identity no daily credits campaign, that Qoder decides that per
+  device, and that the credits can be claimed in Qoder desktop when it
+  shows them (#304: a Linux CLI identity was offered none while the same
+  account's desktop identity was). The plugin never sends another
+  device's identity.
 
 Qoder CN (since 0.2.30) sends its own device identity the same way when
 Qoder CN is installed: its desktop 0.4.9 and CLI (`qoderclicn`) both ask

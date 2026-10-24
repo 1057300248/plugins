@@ -112,3 +112,25 @@ test('Request inputs preserve body, safe headers and cancellation while replacin
   await expect(loader.fetch(new Request(I.BASE+'/chat/completions',{method:'GET'}))).rejects.toThrow();
   expect(calls).toHaveLength(1);
 });
+
+test('one model with effort levels in an unseen shape does not cost the account its catalog',()=>{
+  const payload=JSON.parse(fs.readFileSync(new URL('./fixtures/work-models.redacted.json',import.meta.url),'utf8'));
+  const odd=[
+    {...payload.data[0],id:'synthetic-no-effort',reasoningEffortOptions:[{displayName:'Max'},null,{effort:'REASONING_EFFORT_MAX'}]},
+    {...payload.data[0],id:'synthetic-object-efforts',reasoningEffortOptions:{low:true}},
+    null,'k3-agent',
+  ];
+  const rows=I.modelRows({data:[...payload.data,...odd]});
+  expect(Object.keys(rows)).toEqual(['k3-agent','k2d8-preview','synthetic-no-effort','synthetic-object-efforts']);
+  expect(rows['synthetic-no-effort'].variants).toEqual({max:{reasoningEffort:'max'}});
+  expect(rows['synthetic-object-efforts'].variants).toEqual({});
+  expect(Object.keys(rows['k2d8-preview'].variants)).toEqual(['low','high','max']);
+});
+
+test('before the account list is read, both models Work has listed are offered',async()=>{
+  const p=I.createPlugin({readSession:()=>session,fetchImpl:async()=>{throw Error('no network in tests');}});
+  const cfg={};await p.config(cfg);
+  expect(Object.keys(cfg.provider['kimi-work'].models)).toEqual(['k3-agent','k2d8-preview']);
+  const payload=JSON.parse(fs.readFileSync(new URL('./fixtures/work-models.redacted.json',import.meta.url),'utf8'));
+  expect(Object.keys(cfg.provider['kimi-work'].models)).toEqual(payload.data.map(m=>m.id));
+});
