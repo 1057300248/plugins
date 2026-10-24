@@ -200,13 +200,15 @@ function modelRows(payload) {
   if(!Array.isArray(payload?.data)||payload.has_more||payload.data.length>100) throw Error('Kimi Work 模型目录暂不可用。');
   const out={};
   for(const m of payload.data) {
-    if(typeof m.id!=='string'||!m.id||m.id.length>256||/[\x00-\x20/]/.test(m.id)) continue;
+    if(!isObj(m)||typeof m.id!=='string'||!m.id||m.id.length>256||/[\x00-\x20/]/.test(m.id)) continue;
+    // One model's effort list in a shape not seen before costs that model
+    // its unreadable levels, not the account its whole catalog: a throw
+    // here left only the fallback k3-agent listed. Only levels Kimi lists
+    // are kept, so none is guessed.
     const variants=Object.create(null);
-    if(m.reasoningEffortOptions!==undefined&&!Array.isArray(m.reasoningEffortOptions))throw Error('Kimi Work 思考档位格式无效。');
-    for(const x of m.reasoningEffortOptions||[]) {
-      const effort=String(x.effort||'').replace(/^REASONING_EFFORT_/,'').toLowerCase();
-      if(!/^[a-z][a-z0-9_-]{0,63}$/.test(effort))throw Error('Kimi Work 思考档位格式无效。');
-      variants[effort]={reasoningEffort:effort};
+    for(const x of Array.isArray(m.reasoningEffortOptions)?m.reasoningEffortOptions:[]) {
+      const effort=String(isObj(x)&&typeof x.effort==='string'?x.effort:'').replace(/^REASONING_EFFORT_/,'').toLowerCase();
+      if(/^[a-z][a-z0-9_-]{0,63}$/.test(effort))variants[effort]={reasoningEffort:effort};
     }
     out[m.id]={id:m.id,name:m.display_name||m.id,
       api:{id:m.id,url:BASE,npm:'@ai-sdk/openai-compatible'},
@@ -243,7 +245,10 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch}={}) {
     config:async cfg=>{
       cfg.provider??={};
       cfg.provider[ID]??={name:'Kimi Work',npm:'@ai-sdk/openai-compatible',api:BASE,
-        models:{'k3-agent':{name:'K3 · Work',limit:{context:262144,output:32768},tool_call:true,reasoning:true}}};
+        // Shown until the account's own list is read, and kept when it can't
+        // be: the two ids Work's /models has listed (tests/fixtures).
+        models:{'k3-agent':{name:'K3 · Work',limit:{context:262144,output:32768},tool_call:true,reasoning:true},
+          'k2d8-preview':{name:'K2.8 Preview · Work',limit:{context:262144,output:32768},tool_call:true,reasoning:true}}};
     },
     auth:{
       provider:ID,
