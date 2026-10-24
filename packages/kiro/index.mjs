@@ -26,6 +26,7 @@ import { delimiter, join } from "node:path"
 
 const ID = "kiro"
 const MESSAGES = "@ai-sdk/anthropic"
+const CHAT = "@ai-sdk/openai-compatible"
 const BASE = "https://runtime.us-east-1.kiro.dev" // what OpenCode is given; the fetch sends each request to the account's region
 
 const PORTAL = "https://app.kiro.dev"
@@ -571,18 +572,59 @@ function account(client) {
 const windows = new Map() // a model's context, as Kiro last listed it
 
 const thinks = (id) => /claude/i.test(id) || id === "auto"
-// the levels a thinking model offers, as the built-in thinks them (xhigh as
-// long as max: #120)
-const BUDGETS = { low: 10000, medium: 20000, high: 30000, xhigh: 50000, max: 50000 }
+const EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+// Only the catalog can say which native field and levels a model accepts.
+// Do not derive effort support from a model's name or a token budget.
+function effortSupport(schema) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return null
+  for (const path of ["output_config", "reasoning"]) {
+    const values = schema.properties?.[path]?.properties?.effort?.enum
+    if (!Array.isArray(values)) continue
+    const levels = [...new Set(values.filter((v) => typeof v === "string" && EFFORTS.includes(v)))]
+    if (levels.length) return { path, levels }
+  }
+  return null
+}
+
+const chatModel = (m) => /^gpt(?:[-.]|$)/i.test(m.id) && m.effort?.path === "reasoning"
+const variantsOf = (m) => m.effort
+  ? Object.fromEntries(m.effort.levels.map((effort) => [effort, chatModel(m) ? { reasoningEffort: effort } : { effort }]))
+  : {}
+
+// Account-scoped, short-lived, memory-only catalog. No raw catalog records or
+// credentials are attached to models. A failed lookup is never cached, and a
+// model without an effort schema is looked up again on its next effort request.
+function modelCatalog() {
+  const entries = new Map()
+  const pending = new Map()
+  const keyOf = (a) => createHash("sha256").update(JSON.stringify([a.tokenType, a.token, a.region, a.profile])).digest("hex")
+  return {
+    async get(a, model, refresh = false) {
+      const key = keyOf(a)
+      const hit = entries.get(key)
+      if (!refresh && hit && Date.now() - hit.at < 300000 && (!model || hit.list.some((m) => m.id === model && m.effort))) return hit.list
+      if (pending.has(key)) return pending.get(key)
+      const run = listModels(a).then((list) => {
+        entries.delete(key)
+        entries.set(key, { at: Date.now(), list })
+        while (entries.size > 16) entries.delete(entries.keys().next().value)
+        return list
+      }).finally(() => pending.delete(key))
+      pending.set(key, run)
+      return run
+    },
+  }
+}
 
 function configModel(m) {
   return {
     name: m.name,
+    ...(chatModel(m) ? { provider: { npm: CHAT, api: BASE } } : {}),
     limit: { context: m.context ?? 0, output: m.output ?? 0 },
     ...(m.images ? { attachment: true, modalities: { input: ["text", "image"], output: ["text"] } } : {}),
-    ...(thinks(m.id)
-      ? { reasoning: true, variants: Object.fromEntries(Object.entries(BUDGETS).map(([k, b]) => [k, { thinking: { type: "enabled", budgetTokens: b } }])) }
-      : {}),
+    ...(thinks(m.id) || m.effort ? { reasoning: true } : {}),
+    ...(m.effort ? { variants: variantsOf(m) } : {}),
     tool_call: true,
   }
 }
@@ -593,7 +635,7 @@ function runtimeModel(m) {
     id: m.id,
     providerID: ID,
     name: m.name ?? m.id,
-    api: { id: m.id, url: BASE, npm: MESSAGES },
+    api: { id: m.id, url: BASE, npm: chatModel(m) ? CHAT : MESSAGES },
     status: "active",
     headers: {},
     options: {},
@@ -601,7 +643,7 @@ function runtimeModel(m) {
     limit: { context: m.context ?? 0, output: m.output ?? 0 },
     capabilities: {
       temperature: true,
-      reasoning: thinks(m.id),
+      reasoning: thinks(m.id) || !!m.effort,
       attachment: !!m.images,
       toolcall: true,
       input,
@@ -609,7 +651,7 @@ function runtimeModel(m) {
       interleaved: false,
     },
     release_date: "",
-    variants: thinks(m.id) ? Object.fromEntries(Object.entries(BUDGETS).map(([k, b]) => [k, { thinking: { type: "enabled", budgetTokens: b } }])) : {},
+    variants: variantsOf(m),
   }
 }
 
@@ -642,7 +684,8 @@ async function listModels(a) {
     let name = m.modelName
     if (!name || name === m.modelId) name = m.modelId === "auto" ? "Auto" : m.modelId
     const model = { id: m.modelId, name, context: m.tokenLimits?.maxInputTokens ?? 0, output: m.tokenLimits?.maxOutputTokens ?? 0,
-      images: (m.supportedInputTypes ?? []).some((t) => String(t).toUpperCase() === "IMAGE") }
+      images: (m.supportedInputTypes ?? []).some((t) => String(t).toUpperCase() === "IMAGE"),
+      effort: effortSupport(m.additionalModelRequestFieldsSchema) }
     if (m.modelId === out?.defaultModel?.modelId) list.unshift(model)
     else list.push(model)
   }
@@ -717,16 +760,69 @@ function documentText(p) {
   return `${title}[a ${p.source?.media_type ?? "document"} attachment]`
 }
 
-// thinking is whether the model is asked to think aloud, and for how
-// long: when the caller asked for it, of a Claude model (or Auto).
-function thinking(req, model) {
-  const effort = req.output_config?.effort ?? ""
-  const on = req.thinking?.type === "enabled" || req.thinking?.type === "adaptive" || (effort && effort !== "low")
-  if (!on || !thinks(String(model).toLowerCase())) return 0
-  const budget = { low: 10000, high: 30000, xhigh: 50000, max: 50000 }[effort]
-  if (budget) return budget
-  if (!effort && req.thinking?.budget_tokens > 0) return req.thinking.budget_tokens
-  return 20000
+// Native effort is not a thinking switch, a display setting or a token budget.
+// Multiple explicit spellings must agree; a model suffix is only a fallback.
+function requestEffort(req) {
+  const values = []
+  for (const [obj, key] of [[req.output_config, "effort"], [req.reasoning, "effort"], [req, "reasoning_effort"]]) {
+    if (obj && Object.hasOwn(obj, key)) values.push(obj[key])
+  }
+  for (const value of values)
+    if (typeof value !== "string" || !EFFORTS.includes(value)) throw new Error("invalid reasoning effort; use a level advertised by this Kiro model")
+  if (new Set(values).size > 1) throw new Error("conflicting explicit reasoning effort fields")
+  return values[0]
+}
+
+function validateThinking(req) {
+  const t = req.thinking
+  if (t === undefined) return
+  if (!t || typeof t !== "object" || Array.isArray(t) || !["enabled", "adaptive", "disabled"].includes(t.type))
+    throw new Error("thinking.type must be enabled, adaptive or disabled")
+  if (t.budget_tokens !== undefined && (t.type !== "enabled" || !Number.isSafeInteger(t.budget_tokens) || t.budget_tokens <= 0))
+    throw new Error("thinking.budget_tokens must be a positive integer with thinking.type enabled")
+  if (t.display !== undefined && !["summarized", "omitted"].includes(t.display))
+    throw new Error("thinking.display must be summarized or omitted")
+  if (t.type === "disabled" && requestEffort(req) !== undefined && requestEffort(req) !== "none")
+    throw new Error("disabled thinking conflicts with a non-none reasoning effort")
+  if (requestEffort(req) === "none" && t.type !== "disabled")
+    throw new Error("effort none conflicts with enabled or adaptive thinking")
+}
+
+// Legacy prompt thinking remains opt-in and independent of native effort.
+// Adaptive keeps the existing 20k legacy fallback; no effort selects a budget.
+function thinking(req, model, native = false) {
+  if (!["enabled", "adaptive"].includes(req.thinking?.type)) return 0
+  if (!thinks(String(model).toLowerCase()))
+    throw new Error("this Kiro model cannot use an Anthropic thinking budget; send its native reasoning effort instead (a budget cannot recover xhigh or max)")
+  if (native && req.thinking.budget_tokens === undefined) return 0
+  return req.thinking.type === "enabled" ? (req.thinking.budget_tokens ?? 20000) : 20000
+}
+
+function nativeRequest(req, list) {
+  const asked = String(req.model ?? "auto")
+  const suffix = /:(none|minimal|low|medium|high|xhigh|max)$/.exec(asked)
+  let model = list.find((m) => m.id === asked)
+  let effort = requestEffort(req)
+  if (!model && suffix) {
+    model = list.find((m) => m.id === asked.slice(0, -suffix[0].length))
+    effort ??= suffix[1]
+  }
+  if (!model) throw new Error("Kiro has not listed this model")
+  if (effort === undefined) return { model: model.id }
+  if (!model.effort || model.id === "auto") throw new Error("Kiro has not advertised native effort support for this model")
+  if (!model.effort.levels.includes(effort))
+    throw new Error("unsupported reasoning effort for " + model.id + "; supported: " + model.effort.levels.join(", "))
+  if (req.thinking?.type === "disabled" && effort !== "none")
+    throw new Error("disabled thinking conflicts with a non-none reasoning effort")
+  if (effort === "none" && ["enabled", "adaptive"].includes(req.thinking?.type))
+    throw new Error("effort none conflicts with enabled or adaptive thinking")
+  return { model: model.id, fields: { [model.effort.path]: { effort } } }
+}
+
+// Display only changes the response presented to the caller, never effort or
+// the upstream budget. Both text-tag and native reasoning events are covered.
+async function* visibleEvents(it, display) {
+  for await (const e of it) if (display !== "omitted" || (e.kind !== "think" && e.kind !== "sig")) yield e
 }
 
 // formatText is the structured output a request asks for, said in words:
@@ -741,7 +837,7 @@ function formatText(req) {
 }
 
 // buildKiro is the body of a generateAssistantResponse call.
-function buildKiro(req, model, profile, budget) {
+function buildKiro(req, model, profile, budget, fields) {
   const entries = []
   // the messages the caller marked for its prompt cache (cache_control),
   // which go to Kiro as a cachePoint on the message they end up in (#110)
@@ -856,6 +952,7 @@ function buildKiro(req, model, profile, budget) {
   const format = formatText(req)
   if (format) system = system ? system + "\n\n" + format : format
   if (budget) system = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>` + (system ? "\n" + system : "")
+
   if (system) entries[0].userInputMessage.content = system + "\n\n" + entries[0].userInputMessage.content
   if (Array.isArray(req.system)) mark(entries[0].userInputMessage, req.system)
 
@@ -897,6 +994,7 @@ function buildKiro(req, model, profile, budget) {
   if (entries.length > 1) state.history = entries.slice(0, -1)
   const out = { conversationState: state, agentMode: "vibe" }
   if (profile) out.profileArn = profile
+  if (fields) out.additionalModelRequestFields = fields
   return JSON.stringify(out)
 }
 
@@ -1314,46 +1412,240 @@ async function reply(it, model, stream, names = new Map()) {
   return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } })
 }
 
+// ---- the narrow Chat adapter for catalog-confirmed GPT reasoning models --------------
+// Magpie's Anthropic conversion collapses GPT efforts into token budgets.
+// Declaring these models on Chat keeps reasoning_effort intact before fetch.
+function chatInput(raw) {
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.messages)) throw new Error("Chat messages must be an array")
+  if (raw.n !== undefined && raw.n !== 1) throw new Error("Kiro Chat supports n=1 only")
+  if (raw.parallel_tool_calls === false) throw new Error("Kiro Chat cannot enforce parallel_tool_calls=false")
+  if (raw.stop !== undefined && raw.stop !== null && raw.stop !== "" && (!Array.isArray(raw.stop) || raw.stop.length))
+    throw new Error("Kiro Chat does not support stop sequences")
+  const parts = (content) => {
+    if (content == null) return []
+    if (typeof content === "string") return [{ type: "text", text: content }]
+    if (!Array.isArray(content)) throw new Error("Chat content must be text or an array")
+    return content.map((p) => {
+      if (p?.type === "text" && typeof p.text === "string") return { type: "text", text: p.text, ...(p.cache_control ? { cache_control: p.cache_control } : {}) }
+      if (p?.type === "image_url") {
+        const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]+)$/.exec(p.image_url?.url ?? "")
+        if (match) return { type: "image", source: { type: "base64", media_type: match[1], data: match[2] } }
+        throw new Error("Kiro Chat images must be inline base64 data URLs; remote image URLs are not fetched")
+      }
+      throw new Error("unsupported Chat content part")
+    })
+  }
+  const messages = []
+  const system = []
+  for (const m of raw.messages) {
+    const content = parts(m?.content)
+    if (m.role === "system" || m.role === "developer") {
+      if (content.some((p) => p.type !== "text")) throw new Error("Kiro system messages must contain text")
+      system.push(...content)
+    } else if (m.role === "user") messages.push({ role: "user", content })
+    else if (m.role === "tool") {
+      if (typeof m.tool_call_id !== "string" || !m.tool_call_id) throw new Error("a Chat tool result needs tool_call_id")
+      messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: m.tool_call_id, content }] })
+    } else if (m.role === "assistant") {
+      for (const call of m.tool_calls ?? []) {
+        if (call.type !== "function" || !call.id || !call.function?.name) throw new Error("unsupported Chat tool call")
+        let input
+        try { input = JSON.parse(call.function.arguments) } catch { throw new Error("Chat tool arguments must be a JSON object") }
+        if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Chat tool arguments must be a JSON object")
+        content.push({ type: "tool_use", id: call.id, name: call.function.name, input })
+      }
+      messages.push({ role: "assistant", content })
+    } else throw new Error("unsupported Chat message role")
+  }
+  const tools = (raw.tools ?? []).map((t) => {
+    if (t?.type !== "function" || !t.function?.name) throw new Error("Kiro Chat supports function tools only")
+    return { name: t.function.name, description: t.function.description, input_schema: t.function.parameters,
+      ...(t.cache_control ? { cache_control: t.cache_control } : {}) }
+  })
+  if (raw.tool_choice !== undefined && raw.tool_choice !== "auto")
+    throw new Error("Kiro Chat does not support forced or disabled tool_choice")
+  const effort = requestEffort(raw)
+  const output_config = effort === undefined ? {} : { effort }
+  if (raw.response_format?.type === "json_schema") {
+    if (!raw.response_format.json_schema?.schema) throw new Error("response_format.json_schema needs a schema")
+    output_config.format = { type: "json_schema", schema: raw.response_format.json_schema.schema }
+  } else if (raw.response_format?.type === "json_object") system.push({ type: "text", text: "Respond with a single JSON object and nothing else." })
+  else if (raw.response_format !== undefined && raw.response_format?.type !== "text") throw new Error("unsupported Chat response_format")
+  return { model: raw.model, messages, system, tools, output_config, stream: raw.stream === true,
+    thinking: raw.thinking, includeChatUsage: raw.stream_options?.include_usage === true }
+}
+
+const chatStop = (reason) => ({ tool_use: "tool_calls", max_tokens: "length", refusal: "content_filter" })[reason] ?? "stop"
+const chatUsage = (u) => ({
+  prompt_tokens: u.input + u.cacheRead + u.cacheWrite,
+  completion_tokens: u.output,
+  total_tokens: u.input + u.cacheRead + u.cacheWrite + u.output,
+  prompt_tokens_details: { cached_tokens: u.cacheRead },
+})
+
+// The same decoded Kiro events feed both protocols; no second SSE parser or
+// alternate authentication/tool-history path is introduced.
+async function replyChat(it, model, stream, names, includeUsage = false) {
+  const id = "chatcmpl_" + randomBytes(12).toString("hex")
+  const created = Math.floor(Date.now() / 1000)
+  const base = { id, created, model }
+  if (!stream) {
+    let text = "", reasoning = ""
+    const calls = []
+    for await (const e of it) {
+      if (e.kind === "text") text += e.text
+      else if (e.kind === "think") reasoning += e.text
+      else if (e.kind === "toolStart") calls.push({ id: e.id, type: "function", function: { name: names.get(e.name) ?? e.name, arguments: "" } })
+      else if (e.kind === "toolArgs" && calls.length) calls.at(-1).function.arguments += e.text
+      else if (e.kind === "error") return failedBefore(e.text)
+      else if (e.kind === "stop") return Response.json({ ...base, object: "chat.completion",
+        choices: [{ index: 0, message: { role: "assistant", content: text || null,
+          ...(reasoning ? { reasoning_content: reasoning } : {}), ...(calls.length ? { tool_calls: calls.map((c) => ({ ...c, function: { ...c.function, arguments: c.function.arguments || "{}" } })) } : {}) }, finish_reason: chatStop(e.reason) }],
+        usage: chatUsage(e.usage) })
+    }
+    return errorResponse(502, "the reply ended before it was complete")
+  }
+  const head = await it.next()
+  if (head.value?.kind === "error") return failedBefore(head.value.text)
+  let pending = head, started = false, toolIndex = -1, toolHasArgs = false
+  const enc = new TextEncoder()
+  const data = (value) => enc.encode("data: " + (typeof value === "string" ? value : JSON.stringify(value)) + "\n\n")
+  const chunk = (delta, finish_reason = null) => ({ ...base, object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }] })
+  const body = new ReadableStream({
+    async pull(ctl) {
+      if (!started) { started = true; ctl.enqueue(data(chunk({ role: "assistant" }))); return }
+      const r = pending ?? await it.next()
+      pending = null
+      if (r.done) return ctl.close()
+      const e = r.value
+      const finishTool = () => {
+        if (toolIndex >= 0 && !toolHasArgs) {
+          ctl.enqueue(data(chunk({ tool_calls: [{ index: toolIndex, function: { arguments: "{}" } }] })))
+          toolHasArgs = true
+        }
+      }
+      if (e.kind === "text") ctl.enqueue(data(chunk({ content: e.text })))
+      else if (e.kind === "think") ctl.enqueue(data(chunk({ reasoning_content: e.text })))
+      else if (e.kind === "toolStart") {
+        finishTool()
+        toolHasArgs = false
+        ctl.enqueue(data(chunk({ tool_calls: [{ index: ++toolIndex, id: e.id, type: "function",
+          function: { name: names.get(e.name) ?? e.name, arguments: "" } }] })))
+      } else if (e.kind === "toolArgs") {
+        toolHasArgs = true
+        ctl.enqueue(data(chunk({ tool_calls: [{ index: toolIndex, function: { arguments: e.text } }] })))
+      }
+      else if (e.kind === "error") {
+        ctl.enqueue(data({ error: { type: "api_error", message: e.text } }))
+        ctl.enqueue(data("[DONE]"))
+        return ctl.close()
+      } else if (e.kind === "stop") {
+        finishTool()
+        ctl.enqueue(data(chunk({}, chatStop(e.reason))))
+        if (includeUsage) ctl.enqueue(data({ ...base, object: "chat.completion.chunk", choices: [], usage: chatUsage(e.usage) }))
+        ctl.enqueue(data("[DONE]"))
+        return ctl.close()
+      }
+    },
+    cancel() { it.return?.() },
+  })
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } })
+}
+
 // generate answers a Messages request through Kiro's API: once more,
 // refreshed, when Kiro turns the token down (403). As the built-in: no
 // credentials is a 401, a failed refresh after the 403 a 502; none marks
 // the account.
-async function generate(creds, auth, req, signal) {
-  const model = String(req.model ?? "auto")
-  const budget = thinking(req, model)
+async function generate(creds, auth, req, signal, catalog = modelCatalog(), protocol = "messages") {
+  if (!req || typeof req !== "object" || Array.isArray(req)) return errorResponse(400, "a request must be a JSON object")
+  const requestedModel = String(req.model ?? "auto")
+  let model = requestedModel
+  let effort
+  let budget
+  try {
+    effort = requestEffort(req)
+    validateThinking(req)
+    budget = thinking(req, model)
+    if (model === "auto" && effort !== undefined) throw new Error("Kiro Auto does not advertise a native effort field; select a named model")
+  } catch (e) {
+    return errorResponse(400, e.message)
+  }
   let a
   try {
     a = await creds(auth)
   } catch (e) {
     return errorResponse(401, e.message)
   }
+  let fields
+  let renewed = false
+  if (protocol === "chat" || effort !== undefined || /:(none|minimal|low|medium|high|xhigh|max)$/.test(model)) {
+    let list
+    try {
+      try {
+        list = await catalog.get(a, model)
+      } catch (e) {
+        if (e?.status !== 403) throw e
+        a = await creds(auth, true)
+        renewed = true
+        list = await catalog.get(a, model)
+      }
+    } catch {
+      return errorResponse(502, "could not confirm Kiro's native effort capability; no generation request was sent")
+    }
+    try {
+      const native = nativeRequest(req, list)
+      if (protocol === "chat" && !chatModel(list.find((m) => m.id === native.model)))
+        throw new Error("Kiro Chat is available only for catalog-confirmed GPT reasoning models")
+      model = native.model
+      fields = native.fields
+      budget = thinking(req, model, !!fields)
+    } catch (e) {
+      return errorResponse(400, e.message)
+    }
+  }
   let res
   try {
-    res = await sendKiro(a, buildKiro(req, model, a.profile, budget), signal)
+    res = await sendKiro(a, buildKiro(req, model, a.profile, budget, fields), signal)
   } catch (e) {
     if (e?.name === "AbortError") throw e
     return errorResponse(502, e.message)
   }
-  if (res.status === 403) {
+  if (res.status === 403 && !renewed) {
     await res.body?.cancel()
     try {
       a = await creds(auth, true)
     } catch (e) {
       return errorResponse(502, e.message)
     }
+    if (fields || protocol === "chat") {
+      try {
+        const list = await catalog.get(a, model)
+        const native = nativeRequest(req, list)
+        if (protocol === "chat" && !chatModel(list.find((m) => m.id === native.model))) throw new Error("model protocol changed")
+        model = native.model
+        fields = native.fields
+        budget = thinking(req, model, true)
+      } catch {
+        return errorResponse(502, "could not reconfirm Kiro's native effort capability after credential renewal; no retry was sent")
+      }
+    }
     try {
-      res = await sendKiro(a, buildKiro(req, model, a.profile, budget), signal)
+      res = await sendKiro(a, buildKiro(req, model, a.profile, budget, fields), signal)
     } catch (e) {
       if (e?.name === "AbortError") throw e
       return errorResponse(502, e.message)
     }
   }
   if (!res.ok) {
-    // Kiro's own 401 is passed on, as the built-in did, the sign-in kept
     const f = failure(res.status, (await res.text()).slice(0, 1 << 20))
     return errorResponse(f.status, f.message)
   }
-  return kept(await reply(events(res.body, model, budget), model, req.stream === true, toolNames(req)))
+  const native = fields?.output_config?.effort ?? fields?.reasoning?.effort
+  const splitThinking = budget > 0 || (thinks(model) && native !== undefined && native !== "none")
+  const it = visibleEvents(events(res.body, model, splitThinking), req.thinking?.display)
+  return kept(await (protocol === "chat"
+    ? replyChat(it, requestedModel, req.stream === true, toolNames(req), req.includeChatUsage)
+    : reply(it, requestedModel, req.stream === true, toolNames(req))))
 }
 
 // ---- signing in ----------------------------------------------------------------------
@@ -1537,6 +1829,7 @@ async function bodyOf(input, init) {
 
 export async function KiroAuthPlugin({ client } = {}) {
   const creds = account(client)
+  const catalog = modelCatalog()
   return {
     auth: {
       provider: ID,
@@ -1561,15 +1854,18 @@ export async function KiroAuthPlugin({ client } = {}) {
           // every Messages request answered through Kiro's own API
           async fetch(input, init = {}) {
             const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
-            if (!/\/messages$/.test(new URL(url).pathname))
-              return errorResponse(404, `this plugin only answers Anthropic Messages requests, not ${new URL(url).pathname}`)
+            const path = new URL(url).pathname
+            const protocol = /\/chat\/completions$/.test(path) ? "chat" : "messages"
+            if (!/\/(messages|chat\/completions)$/.test(path))
+              return errorResponse(404, `this plugin answers Messages and Chat completions requests, not ${path}`)
             let req
             try {
               req = await bodyOf(input, init)
-            } catch {
-              return errorResponse(400, "a request that isn't JSON")
+              if (protocol === "chat") req = chatInput(req)
+            } catch (e) {
+              return errorResponse(400, e instanceof SyntaxError ? "a request that isn't JSON" : e.message)
             }
-            return generate(creds, (await getAuth()) ?? auth, req, init.signal)
+            return generate(creds, (await getAuth()) ?? auth, req, init.signal, catalog, protocol)
           },
         }
       },
@@ -1610,7 +1906,7 @@ export async function KiroAuthPlugin({ client } = {}) {
       async models(provider, { auth } = {}) {
         if (!(auth?.type === "api" && auth.key) && auth?.type !== "oauth") return provider.models
         try {
-          const list = await listModels(await creds(auth))
+          const list = await catalog.get(await creds(auth), undefined, true)
           return Object.fromEntries(list.map((m) => [m.id, runtimeModel(m)]))
         } catch {
           return provider.models
@@ -1621,4 +1917,4 @@ export async function KiroAuthPlugin({ client } = {}) {
 }
 
 // for tests
-export const _internal = { generate, refresh, usageOf, buildKiro, events, reply, failure, toolID, toolName, toolNames, thinking, configModel, runtimeModel, readCLI, readIDE, regionOf, planName, frames }
+export const _internal = { chatInput, replyChat, chatUsage, chatStop, chatModel, effortSupport, requestEffort, validateThinking, nativeRequest, modelCatalog, visibleEvents, listModels, generate, refresh, usageOf, buildKiro, events, reply, failure, toolID, toolName, toolNames, thinking, configModel, runtimeModel, readCLI, readIDE, regionOf, planName, frames }
