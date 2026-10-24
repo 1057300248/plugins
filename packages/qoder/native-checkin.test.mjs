@@ -80,9 +80,26 @@ test("an already-claimed campaign is done without another claim", async () => {
   expect(p.seen.map((x) => x.path)).toEqual(["/sash/api/v1/me/campaigns"])
 })
 
-test("no benefit campaign is inactive", async () => {
+// plugins#304 (ReneXiong): the identity was read and sent, and the list
+// still had no CLAIM_BENEFIT. Qoder decides that per device, so the answer
+// says it was this device's identity that was offered nothing, and that
+// Qoder desktop can still claim it, instead of a bare "inactive".
+test("no benefit campaign is inactive, saying this device's identity was offered none", async () => {
   const p = await checkin(QoderAuthPlugin, () => json({ campaigns: [{ campaignId: "x", actionType: "VIEW_DETAILS", claimStatus: "CLAIMABLE" }] }))
-  expect(p.out).toEqual({ outcome: "inactive" })
+  expect(p.out.outcome).toBe("inactive")
+  expect(p.out.message).toContain("Qoder offered this device's identity")
+  expect(p.out.message).toContain("no daily credits campaign")
+  expect(p.out.message).toContain("claim them there")
+  expect(p.out.message).toContain("Qoder desktop")
+  expect(reads).toHaveLength(1)
+})
+
+test("CN offered nothing with Qoder CN's own identity is inactive, naming Qoder CN", async () => {
+  const p = await checkin(QoderCNAuthPlugin, () => json({ campaigns: [] }), "https://openapi.qoder.com.cn")
+  expect(p.out.outcome).toBe("inactive")
+  expect(p.out.message).toContain("Qoder CN offered this device's identity")
+  expect(p.out.message).toContain("Qoder CN desktop")
+  expect(reads).toHaveLength(1)
 })
 
 test("a claim answer with nested data is read", async () => {

@@ -1655,6 +1655,12 @@ class RuntimeMissing extends Error {
   }
 }
 
+// noCampaign is why a check-in asked with this machine's own device
+// identity found nothing to claim: all the list says is that it offered
+// that identity no daily credits, not why.
+const noCampaign = (name) =>
+  `${name} check-in: ${name} offered this device's identity, read from this machine's own ${name} runtime-info, no daily credits campaign right now. ${name} decides per device whether to offer it; if ${name} desktop shows today's credits, claim them there`
+
 // Read the SDK identity as Qoder does: environment 3 is international, 0
 // Qoder CN; on Windows and macOS the uid goes over stdin, never into the
 // command line.
@@ -2094,7 +2100,11 @@ const makePlugin = (site) => async ({ client }) => {
         // (no Qoder CN on this machine) or ask again (it didn't answer).
         if (unread instanceof RuntimeMissing) return { outcome: "ineligible", message: unread.message }
         if (unread) return { outcome: "failed", message: unread.message }
-        return { outcome: "inactive" }
+        // Asked with this machine's own identity and still offered nothing:
+        // Qoder decides per device (plugins#304, a Linux CLI identity was
+        // offered none while the same account's desktop identity was), so
+        // say that much, and where the credits can still be claimed.
+        return { outcome: "inactive", message: noCampaign(site.name) }
       }
       const claimRes = await call(base.replace(/\/$/, "") + "/" + encodeURIComponent(campaign.campaignId) + "/claim", "POST", "{}")
       let claim = {}
